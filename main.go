@@ -42,18 +42,26 @@ func main() {
 	}
 
 	addr := flag.String("addr", "127.0.0.1:7676", "listen address")
-	dataDir := flag.String("data", "data", "directory for usage history")
+	dataDir := flag.String("data", "data", "directory for the SQLite database")
+	archiveDelete := flag.Bool("archive-delete", true,
+		"delete SMS from modem/SIM storage after archiving to the database")
 	flag.Parse()
 
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
 
+	store, err := OpenStore(*dataDir)
+	if err != nil {
+		log.Fatalf("open store: %v", err)
+	}
 	modem := NewModem()
-	traffic := NewTrafficTracker(*dataDir)
+	traffic := NewTrafficTracker(store)
 	traffic.Start()
+	archiver := NewArchiver(modem, store, *archiveDelete)
+	archiver.Start()
 
-	srv := &http.Server{Addr: *addr, Handler: NewServer(modem, traffic).Handler()}
+	srv := &http.Server{Addr: *addr, Handler: NewServer(modem, traffic, store, archiver).Handler()}
 
 	go func() {
 		log.Printf("vohive-mac listening on http://%s", *addr)
@@ -69,5 +77,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx) //nolint:errcheck
+	archiver.Stop()
 	traffic.Stop()
+	store.Close() //nolint:errcheck
 }

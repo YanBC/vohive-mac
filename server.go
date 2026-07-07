@@ -14,16 +14,18 @@ import (
 var staticFS embed.FS
 
 type Server struct {
-	modem   *Modem
-	traffic *TrafficTracker
+	modem    *Modem
+	traffic  *TrafficTracker
+	store    *Store
+	archiver *Archiver
 
 	statusMu   sync.Mutex
 	statusVal  Status
 	statusTime time.Time
 }
 
-func NewServer(m *Modem, t *TrafficTracker) *Server {
-	return &Server{modem: m, traffic: t}
+func NewServer(m *Modem, t *TrafficTracker, s *Store, a *Archiver) *Server {
+	return &Server{modem: m, traffic: t, store: s, archiver: a}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -58,13 +60,17 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
-	msgs, err := s.modem.ReadInbox()
+	// pull fresh messages off the modem first (no-op if synced recently)
+	if err := s.archiver.SyncIfStale(30 * time.Second); err != nil {
+		log.Printf("sms sync: %v", err)
+	}
+	msgs, err := s.store.ListMessages(200)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, err)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	if msgs == nil {
-		msgs = []InboxMessage{}
+		msgs = []StoredMessage{}
 	}
 	writeJSON(w, http.StatusOK, msgs)
 }
@@ -88,6 +94,9 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("sms sent to %s (%d part(s))", req.To, res.Parts)
+	if err := s.store.RecordOutbound(req.To, req.Text); err != nil {
+		log.Printf("record outbound sms: %v", err)
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 

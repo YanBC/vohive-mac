@@ -6,14 +6,20 @@ BAIWANG/Quectel-style 4G USB dongle **entirely from userspace over raw USB**
 (libusb) — no kernel extensions, no serial drivers — and serves a web console for:
 
 1. **Live modem status** — carrier, RAT, signal, SIM state, WAN IP
-2. **SMS** — send messages (full Unicode/UCS2, auto-split) and read the inbox
-   (PDU decoding, concatenated-message reassembly)
+2. **SMS** — send messages (full Unicode/UCS2, auto-split) and browse the
+   message archive (PDU decoding, concatenated-message reassembly). Messages
+   are continuously archived from the modem/SIM storage into SQLite and, by
+   default, deleted from the hardware afterwards — the tiny hardware slot
+   pools (e.g. 50 on SIM, 23 in modem flash) never fill up and bounce
+   incoming messages. Disable deletion with `-archive-delete=false`.
 3. **Cellular data usage** — live throughput chart, session/today totals, daily
    history persisted across restarts
 
 Single Go binary; the UI is embedded. SMS goes over the dongle's AT port via USB
 bulk transfers; data usage is sampled from the macOS interface counters of the
-dongle's ECM network interface.
+dongle's ECM network interface. All persistent state lives in one SQLite
+database at `data/vohive.db` (a legacy `data/usage.json` is imported once and
+renamed).
 
 ## Prerequisites
 
@@ -49,16 +55,18 @@ This is also the tool used for the one-time ECM mode switch in the setup doc.
 |---|---|---|
 | `/api/status` | GET | Modem/SIM/network status (cached 5 s) |
 | `/api/traffic` | GET | Counters, rates, history, daily usage |
-| `/api/sms/inbox` | GET | Decoded inbox messages, newest first |
-| `/api/sms/send` | POST | `{"to": "+86138...", "text": "..."}` |
+| `/api/sms/inbox` | GET | Archived messages (in + out), newest first; triggers a modem sync if stale |
+| `/api/sms/send` | POST | `{"to": "+86138...", "text": "..."}` — also recorded in the archive |
 
 ## Layout
 
 ```
 main.go      entrypoint + `at` CLI subcommand
-modem.go     raw-USB AT channel, SMS send (UCS2), status queries
-pdu.go       SMS-DELIVER PDU decoder + concat reassembly
-traffic.go   interface-counter sampler, daily usage persistence (data/usage.json)
+modem.go     raw-USB AT channel, SMS send (UCS2), storage access, status queries
+pdu.go       SMS-DELIVER PDU decoder
+ingest.go    SMS archiver: modem/SIM storage → SQLite (delete after archive)
+db.go        SQLite store (messages + usage tables)
+traffic.go   interface-counter sampler, write-through daily usage persistence
 server.go    HTTP API + embedded static UI
 static/      web console (self-contained HTML/CSS/JS)
 docs/        dongle setup manual (USB mode switch, troubleshooting, uninstall)

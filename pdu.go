@@ -5,7 +5,6 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
 	"unicode/utf16"
 )
@@ -214,55 +213,4 @@ func decodePDU(pduHex string) (*pduRecord, error) {
 		rec.text = decodeGSM7(ud, int(udl), skip)
 	}
 	return rec, nil
-}
-
-// reassemble merges concatenated-SMS parts into single messages, newest first.
-func reassemble(msgs []pduRecord) []InboxMessage {
-	type key struct {
-		sender string
-		ref    int
-	}
-	singles := make([]pduRecord, 0, len(msgs))
-	groups := map[key]map[int]pduRecord{}
-	for _, m := range msgs {
-		if m.concatRef >= 0 {
-			k := key{m.sender, m.concatRef}
-			if groups[k] == nil {
-				groups[k] = map[int]pduRecord{}
-			}
-			groups[k][m.concatSeq] = m
-		} else {
-			singles = append(singles, m)
-		}
-	}
-	for _, parts := range groups {
-		seqs := make([]int, 0, len(parts))
-		total := 0
-		for s, p := range parts {
-			seqs = append(seqs, s)
-			total = p.concatTot
-		}
-		sort.Ints(seqs)
-		merged := parts[seqs[0]]
-		var sb strings.Builder
-		for _, s := range seqs {
-			sb.WriteString(parts[s].text)
-		}
-		if len(parts) < total {
-			fmt.Fprintf(&sb, " …[%d/%d parts]", len(parts), total)
-		}
-		merged.text = sb.String()
-		singles = append(singles, merged)
-	}
-	sort.Slice(singles, func(i, j int) bool {
-		return singles[i].timestamp > singles[j].timestamp
-	})
-	out := make([]InboxMessage, len(singles))
-	for i, m := range singles {
-		out[i] = InboxMessage{
-			Index: m.index, Sender: m.sender,
-			Timestamp: m.timestamp, Text: m.text,
-		}
-	}
-	return out
 }

@@ -2,18 +2,15 @@
 //
 // The dongle in ECM mode is a plain network interface to macOS, so usage is
 // measured from the interface byte counters (netstat -ibn) of the Baiwang
-// ECM interface, sampled every few seconds. Daily totals are persisted to
-// data/usage.json so history survives restarts; counter resets (replug,
-// reboot) are handled by treating a lower reading as a fresh baseline.
+// ECM interface, sampled every few seconds. Daily totals are write-through
+// persisted to the SQLite store; counter resets (replug, reboot) are handled
+// by treating a lower reading as a fresh baseline.
 package main
 
 import (
-	"encoding/json"
-	"os"
+	"log"
 	"os/exec"
-	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,7 +49,7 @@ type TrafficSnapshot struct {
 
 type TrafficTracker struct {
 	mu        sync.Mutex
-	dataFile  string
+	store     *Store
 	iface     string
 	up        bool
 	lastRx    uint64
@@ -61,46 +58,20 @@ type TrafficTracker struct {
 	lastTime  time.Time
 	sessionRx uint64
 	sessionTx uint64
-	daily     map[string]*DayUsage
+	today     DayUsage
 	history   []RatePoint
 	lastSave  time.Time
 	stop      chan struct{}
 }
 
-func NewTrafficTracker(dataDir string) *TrafficTracker {
-	t := &TrafficTracker{
-		dataFile: filepath.Join(dataDir, "usage.json"),
-		daily:    map[string]*DayUsage{},
-		stop:     make(chan struct{}),
-	}
-	t.load()
-	return t
-}
-
-func (t *TrafficTracker) load() {
-	raw, err := os.ReadFile(t.dataFile)
+func NewTrafficTracker(store *Store) *TrafficTracker {
+	day := time.Now().Format("2006-01-02")
+	today, err := store.GetDayUsage(day)
 	if err != nil {
-		return
+		log.Printf("load today's usage: %v", err)
+		today = DayUsage{Day: day}
 	}
-	var days []DayUsage
-	if json.Unmarshal(raw, &days) == nil {
-		for i := range days {
-			d := days[i]
-			t.daily[d.Day] = &d
-		}
-	}
-}
-
-func (t *TrafficTracker) saveLocked() {
-	days := make([]DayUsage, 0, len(t.daily))
-	for _, d := range t.daily {
-		days = append(days, *d)
-	}
-	sort.Slice(days, func(i, j int) bool { return days[i].Day < days[j].Day })
-	if raw, err := json.MarshalIndent(days, "", "  "); err == nil {
-		os.WriteFile(t.dataFile, raw, 0o644) //nolint:errcheck
-	}
-	t.lastSave = time.Now()
+	return &TrafficTracker{store: store, today: today, stop: make(chan struct{})}
 }
 
 var bsdNameRe = regexp.MustCompile(`"BSD Name"\s*=\s*"(en\d+)"`)
@@ -161,19 +132,31 @@ func (t *TrafficTracker) Start() {
 func (t *TrafficTracker) Stop() {
 	close(t.stop)
 	t.mu.Lock()
-	t.saveLocked()
+	t.persistLocked()
 	t.mu.Unlock()
+}
+
+func (t *TrafficTracker) persistLocked() {
+	if err := t.store.SetDayUsage(t.today); err != nil {
+		log.Printf("persist usage: %v", err)
+	}
+	t.lastSave = time.Now()
 }
 
 func (t *TrafficTracker) sample() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	now := time.Now()
+	if day := now.Format("2006-01-02"); day != t.today.Day {
+		t.persistLocked() // close out the finished day
+		t.today = DayUsage{Day: day}
+	}
+
 	if t.iface == "" {
 		t.iface = resolveIface()
 	}
 	rx, tx, ok := t.readIface()
-	now := time.Now()
 	if !ok {
 		t.up = false
 		t.haveLast = false
@@ -193,21 +176,15 @@ func (t *TrafficTracker) sample() {
 		}
 		t.sessionRx += drx
 		t.sessionTx += dtx
-		day := now.Format("2006-01-02")
-		d := t.daily[day]
-		if d == nil {
-			d = &DayUsage{Day: day}
-			t.daily[day] = d
-		}
-		d.Rx += drx
-		d.Tx += dtx
+		t.today.Rx += drx
+		t.today.Tx += dtx
 	} else {
 		t.history = appendPoint(t.history, RatePoint{T: now.Unix()})
 	}
 	t.lastRx, t.lastTx, t.lastTime, t.haveLast = rx, tx, now, true
 
 	if time.Since(t.lastSave) > persistEvery {
-		t.saveLocked()
+		t.persistLocked()
 	}
 }
 
@@ -247,25 +224,28 @@ func (t *TrafficTracker) Snapshot() TrafficSnapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	today := time.Now().Format("2006-01-02")
 	snap := TrafficSnapshot{
 		Iface:     t.iface,
 		Up:        t.up,
 		SessionRx: t.sessionRx,
 		SessionTx: t.sessionTx,
-		Today:     DayUsage{Day: today},
+		Today:     t.today,
 		History:   append([]RatePoint(nil), t.history...),
 	}
-	if d := t.daily[today]; d != nil {
-		snap.Today = *d
+	days, err := t.store.RecentDays(14)
+	if err != nil {
+		log.Printf("recent days: %v", err)
 	}
-	days := make([]DayUsage, 0, len(t.daily))
-	for _, d := range t.daily {
-		days = append(days, *d)
+	// the DB may lag the in-memory today by up to persistEvery
+	found := false
+	for i := range days {
+		if days[i].Day == t.today.Day {
+			days[i] = t.today
+			found = true
+		}
 	}
-	sort.Slice(days, func(i, j int) bool { return days[i].Day > days[j].Day })
-	if len(days) > 14 {
-		days = days[:14]
+	if !found {
+		days = append([]DayUsage{t.today}, days...)
 	}
 	snap.Days = days
 	if n := len(t.history); n > 0 {

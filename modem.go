@@ -299,23 +299,21 @@ func (m *Modem) sendOneLocked(to, chunk string) (int, error) {
 	return ref, nil
 }
 
-// --------------------------------------------- SMS inbox (PDU mode, robust)
+// ------------------------------------ SMS storage access (PDU mode, robust)
 
-type InboxMessage struct {
-	Index     int    `json:"index"`
-	Sender    string `json:"sender"`
-	Timestamp string `json:"timestamp"`
-	Text      string `json:"text"`
-}
-
-func (m *Modem) ReadInbox() ([]InboxMessage, error) {
+// ListStorage returns all decodable messages in one storage ("SM" or "ME"),
+// with their slot indexes, without merging concatenated parts.
+func (m *Modem) ListStorage(storage string) ([]pduRecord, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	// select <mem1> (the read/list/delete storage) only
+	if _, err := m.cmdLocked(fmt.Sprintf(`AT+CPMS="%s"`, storage), 5*time.Second); err != nil {
+		return nil, err
+	}
 	if _, err := m.cmdLocked("AT+CMGF=0", 5*time.Second); err != nil {
-		m.mu.Unlock()
 		return nil, err
 	}
 	resp, err := m.cmdLocked("AT+CMGL=4", 20*time.Second) // 4 = ALL in PDU mode
-	m.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +339,25 @@ func (m *Modem) ReadInbox() ([]InboxMessage, error) {
 		raw = append(raw, *dec)
 		i++
 	}
-	return reassemble(raw), nil
+	return raw, nil
+}
+
+// DeleteMessages removes the given slot indexes from one storage.
+func (m *Modem) DeleteMessages(storage string, indexes []int) error {
+	if len(indexes) == 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, err := m.cmdLocked(fmt.Sprintf(`AT+CPMS="%s"`, storage), 5*time.Second); err != nil {
+		return err
+	}
+	for _, idx := range indexes {
+		if _, err := m.cmdLocked(fmt.Sprintf("AT+CMGD=%d", idx), 8*time.Second); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ------------------------------------------------------------------- status

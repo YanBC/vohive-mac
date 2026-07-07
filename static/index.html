@@ -133,8 +133,10 @@ button.ghost:hover{color:var(--ph); border-color:var(--ph-dim)}
 #inbox{display:flex; flex-direction:column; gap:8px; max-height:430px; overflow:auto}
 .msg{border:1px solid var(--line); border-left:2px solid var(--ph-dim);
   background:rgba(0,0,0,.25); padding:9px 12px}
+.msg.out{border-left-color:var(--amber)}
 .msg .meta{display:flex; gap:12px; font-size:10px; color:var(--dim); margin-bottom:4px; letter-spacing:.06em}
 .msg .meta .from{color:var(--amber)}
+.msg.out .meta .from{color:var(--ph)}
 .msg .body{font-size:13px; color:#dfeee2; word-break:break-word; white-space:pre-wrap}
 .empty{color:var(--faint); font-size:12px; padding:14px 0; text-align:center; letter-spacing:.15em}
 
@@ -323,11 +325,13 @@ async function loadInbox(){
     const j=await r.json();
     if(!r.ok) throw new Error(j.error||r.statusText);
     $("inboxcnt").textContent=j.length+" msg";
-    box.innerHTML=j.length?j.map(m=>
-      `<div class="msg"><div class="meta"><span class="from">${esc(m.sender)}</span>
+    box.innerHTML=j.length?j.map(m=>{
+      const out=m.direction==="out";
+      return `<div class="msg${out?" out":""}"><div class="meta">
+       <span class="from">${out?"→ ":""}${esc(m.peer)}</span>
        <span>${esc(m.timestamp)}</span></div>
-       <div class="body">${esc(m.text)}</div></div>`).join("")
-      :'<div class="empty">— inbox empty —</div>';
+       <div class="body">${esc(m.body)}</div></div>`;}).join("")
+      :'<div class="empty">— no messages —</div>';
   }catch(e){
     box.innerHTML='<div class="empty">inbox unavailable: '+esc(e.message)+'</div>';
   }
