@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VOHIVE·MAC — cellular console</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='2' y='14' width='4' height='8' fill='%2357e389'/><rect x='9' y='9' width='4' height='13' fill='%2357e389'/><rect x='16' y='3' width='4' height='19' fill='%23224433'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Michroma&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0e0b; --panel:#0e1410; --panel2:#101812; --line:#1d2a20;
+  --ink:#c8d6cb; --dim:#5c6f61; --faint:#37453b;
+  --ph:#57e389; --ph-dim:#2b6b45; --amber:#f0b13e; --red:#e05555;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --disp:"Michroma",var(--mono);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--bg)}
+body{
+  font-family:var(--mono); color:var(--ink); min-height:100vh;
+  background:
+    radial-gradient(1200px 600px at 70% -10%, rgba(87,227,137,.05), transparent 60%),
+    radial-gradient(900px 500px at 0% 110%, rgba(240,177,62,.04), transparent 60%),
+    var(--bg);
+  font-size:14px; line-height:1.5;
+}
+/* scanline atmosphere */
+body::after{
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:99;
+  background:repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0 1px, transparent 1px 3px);
+  mix-blend-mode:overlay;
+}
+a{color:var(--ph)}
+.wrap{max-width:1180px; margin:0 auto; padding:22px clamp(14px,3vw,36px) 60px}
+
+/* ---------- header ---------- */
+header{
+  display:flex; flex-wrap:wrap; gap:14px 26px; align-items:center;
+  border:1px solid var(--line); background:linear-gradient(180deg,var(--panel2),var(--panel));
+  padding:16px 20px; position:relative;
+}
+.brand{display:flex; align-items:baseline; gap:10px}
+.brand h1{font-family:var(--disp); font-size:17px; letter-spacing:.22em; color:#e8f4ea; font-weight:400}
+.brand h1 b{color:var(--ph); font-weight:400}
+.brand .sub{font-size:10px; color:var(--dim); letter-spacing:.18em; text-transform:uppercase}
+.hstats{display:flex; flex-wrap:wrap; gap:8px 22px; margin-left:auto; align-items:center}
+.stat{display:flex; flex-direction:column; gap:1px; min-width:70px}
+.stat .k{font-size:9px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase}
+.stat .v{font-size:13px; color:#dfeee2; white-space:nowrap}
+.led{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px;
+  background:var(--faint); box-shadow:0 0 6px transparent; vertical-align:1px; transition:.3s}
+.led.on{background:var(--ph); box-shadow:0 0 8px var(--ph)}
+.led.err{background:var(--red); box-shadow:0 0 8px var(--red)}
+/* signal bars */
+.sig{display:inline-flex; gap:2px; align-items:flex-end; height:16px}
+.sig i{width:4px; background:var(--faint); display:block; transition:.3s}
+.sig i:nth-child(1){height:4px}.sig i:nth-child(2){height:7px}
+.sig i:nth-child(3){height:10px}.sig i:nth-child(4){height:13px}.sig i:nth-child(5){height:16px}
+.sig i.on{background:var(--ph); box-shadow:0 0 5px rgba(87,227,137,.7)}
+
+/* ---------- layout ---------- */
+main{display:grid; grid-template-columns:minmax(0,7fr) minmax(0,5fr); gap:18px; margin-top:18px}
+@media(max-width:920px){ main{grid-template-columns:1fr} }
+.panel{
+  border:1px solid var(--line); background:linear-gradient(180deg,var(--panel2),var(--panel));
+  position:relative; padding:18px 20px 20px;
+}
+/* HUD corner ticks */
+.panel::before,.panel::after,
+.panel .tick::before,.panel .tick::after{
+  content:""; position:absolute; width:10px; height:10px; border:1px solid var(--ph-dim);
+}
+.panel::before{top:-1px; left:-1px; border-right:0; border-bottom:0}
+.panel::after{top:-1px; right:-1px; border-left:0; border-bottom:0}
+.panel .tick::before{bottom:-1px; left:-1px; border-right:0; border-top:0}
+.panel .tick::after{bottom:-1px; right:-1px; border-left:0; border-top:0}
+.panel h2{
+  font-family:var(--disp); font-weight:400; font-size:11px; letter-spacing:.28em;
+  color:var(--dim); text-transform:uppercase; margin-bottom:16px;
+  display:flex; align-items:center; gap:10px;
+}
+.panel h2::after{content:""; flex:1; height:1px; background:var(--line)}
+
+/* ---------- traffic ---------- */
+.bignums{display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px; margin-bottom:16px}
+.big{border:1px solid var(--line); background:rgba(0,0,0,.25); padding:10px 12px}
+.big .k{font-size:9px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase}
+.big .v{font-size:clamp(17px,2.2vw,22px); color:#eafff0; margin-top:2px; font-weight:600}
+.big .v small{font-size:11px; color:var(--dim); font-weight:400}
+.big.rx .v{color:var(--ph)} .big.tx .v{color:var(--amber)}
+canvas#chart{width:100%; height:170px; display:block; background:rgba(0,0,0,.3);
+  border:1px solid var(--line)}
+.legend{display:flex; gap:18px; font-size:10px; color:var(--dim); margin-top:8px; letter-spacing:.12em}
+.legend b{font-weight:400}
+.legend .swrx,.legend .swtx{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:6px}
+.legend .swrx{background:var(--ph)} .legend .swtx{background:var(--amber)}
+.days{margin-top:18px}
+.dayrow{display:grid; grid-template-columns:86px 1fr 90px; gap:10px; align-items:center;
+  padding:3px 0; font-size:12px}
+.dayrow .bar{height:9px; background:rgba(0,0,0,.35); border:1px solid var(--line); position:relative}
+.dayrow .bar i{position:absolute; inset:1px auto 1px 1px; background:linear-gradient(90deg,var(--ph-dim),var(--ph))}
+.dayrow .bar b{position:absolute; inset:1px auto 1px 1px; background:var(--amber); opacity:.85}
+.dayrow .n{color:var(--dim)} .dayrow .t{text-align:right; color:#dfeee2}
+
+/* ---------- sms ---------- */
+form{display:grid; gap:10px; margin-bottom:18px}
+label{font-size:9px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase; display:block; margin-bottom:4px}
+input,textarea{
+  width:100%; background:rgba(0,0,0,.35); border:1px solid var(--line); color:#eafff0;
+  font-family:var(--mono); font-size:14px; padding:9px 11px; outline:none; border-radius:0;
+  transition:border-color .2s, box-shadow .2s;
+}
+input:focus,textarea:focus{border-color:var(--ph-dim); box-shadow:0 0 0 1px var(--ph-dim), 0 0 14px rgba(87,227,137,.12)}
+textarea{resize:vertical; min-height:88px}
+.formfoot{display:flex; align-items:center; gap:14px}
+.count{font-size:11px; color:var(--dim)}
+button{
+  font-family:var(--disp); font-size:11px; letter-spacing:.24em; text-transform:uppercase;
+  background:var(--ph); color:#04160b; border:0; padding:11px 22px; cursor:pointer;
+  margin-left:auto; transition:.15s; border-radius:0;
+}
+button:hover{box-shadow:0 0 18px rgba(87,227,137,.45)}
+button:disabled{background:var(--faint); color:var(--dim); cursor:wait; box-shadow:none}
+button.ghost{background:transparent; color:var(--dim); border:1px solid var(--line); padding:6px 12px; font-size:9px; margin-left:0}
+button.ghost:hover{color:var(--ph); border-color:var(--ph-dim)}
+.note{font-size:11px; padding:9px 12px; border:1px solid var(--line); display:none; white-space:pre-wrap}
+.note.ok{display:block; color:var(--ph); border-color:var(--ph-dim); background:rgba(87,227,137,.06)}
+.note.err{display:block; color:var(--red); border-color:#5c2626; background:rgba(224,85,85,.07)}
+/* inbox */
+.inboxhead{display:flex; align-items:center; gap:10px; margin:4px 0 10px}
+.inboxhead .cnt{font-size:10px; color:var(--dim); letter-spacing:.15em}
+#inbox{display:flex; flex-direction:column; gap:8px; max-height:430px; overflow:auto}
+.msg{border:1px solid var(--line); border-left:2px solid var(--ph-dim);
+  background:rgba(0,0,0,.25); padding:9px 12px}
+.msg .meta{display:flex; gap:12px; font-size:10px; color:var(--dim); margin-bottom:4px; letter-spacing:.06em}
+.msg .meta .from{color:var(--amber)}
+.msg .body{font-size:13px; color:#dfeee2; word-break:break-word; white-space:pre-wrap}
+.empty{color:var(--faint); font-size:12px; padding:14px 0; text-align:center; letter-spacing:.15em}
+
+footer{margin-top:22px; font-size:10px; color:var(--faint); letter-spacing:.15em; text-align:center}
+::-webkit-scrollbar{width:8px; height:8px}
+::-webkit-scrollbar-thumb{background:var(--line)}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brand">
+    <h1>VOHIVE<b>·MAC</b></h1>
+    <span class="sub">cellular&nbsp;console</span>
+  </div>
+  <div class="hstats">
+    <div class="stat"><span class="k">modem</span>
+      <span class="v"><i class="led" id="led"></i><span id="st-model">—</span></span></div>
+    <div class="stat"><span class="k">carrier</span><span class="v" id="st-op">—</span></div>
+    <div class="stat"><span class="k">sim</span><span class="v" id="st-sim">—</span></div>
+    <div class="stat"><span class="k">wan ip</span><span class="v" id="st-ip">—</span></div>
+    <div class="stat"><span class="k">signal</span>
+      <span class="v"><span class="sig" id="sig"><i></i><i></i><i></i><i></i><i></i></span>
+      <span id="st-rssi" style="font-size:10px;color:var(--dim)"></span></span></div>
+  </div>
+</header>
+
+<main>
+  <section class="panel"><span class="tick"></span>
+    <h2>Data Usage</h2>
+    <div class="bignums">
+      <div class="big rx"><div class="k">▼ down</div><div class="v" id="rate-rx">0 <small>B/s</small></div></div>
+      <div class="big tx"><div class="k">▲ up</div><div class="v" id="rate-tx">0 <small>B/s</small></div></div>
+      <div class="big"><div class="k">today</div><div class="v" id="today">—</div></div>
+      <div class="big"><div class="k">session</div><div class="v" id="session">—</div></div>
+    </div>
+    <canvas id="chart" width="800" height="170"></canvas>
+    <div class="legend"><span><i class="swrx"></i><b>download</b></span>
+      <span><i class="swtx"></i><b>upload</b></span>
+      <span style="margin-left:auto" id="ifname"></span></div>
+    <div class="days" id="days"></div>
+  </section>
+
+  <section class="panel"><span class="tick"></span>
+    <h2>Messages</h2>
+    <form id="smsform" autocomplete="off">
+      <div><label for="to">recipient number</label>
+        <input id="to" placeholder="+8613800138000" spellcheck="false"></div>
+      <div><label for="text">message</label>
+        <textarea id="text" placeholder="type message…"></textarea></div>
+      <div class="formfoot">
+        <span class="count" id="count">0 chars · 1 sms</span>
+        <button type="submit" id="sendbtn">Transmit</button>
+      </div>
+      <div class="note" id="note"></div>
+    </form>
+    <div class="inboxhead">
+      <h2 style="margin:0;flex:1">Inbox</h2>
+      <span class="cnt" id="inboxcnt"></span>
+      <button class="ghost" type="button" id="refresh">refresh</button>
+    </div>
+    <div id="inbox"><div class="empty">loading…</div></div>
+  </section>
+</main>
+
+<footer>VOHIVE·MAC // BAIWANG QDC507 OVER RAW USB // NO KEXT, NO DRIVER</footer>
+</div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+
+function fmtBytes(n){
+  if(n==null) return "—";
+  const u=["B","KB","MB","GB","TB"]; let i=0;
+  while(n>=1024 && i<u.length-1){n/=1024;i++}
+  return n.toFixed(n>=100||i===0?0:n>=10?1:2)+" "+u[i];
+}
+function fmtRate(el,bps){
+  const u=["B/s","KB/s","MB/s","GB/s"]; let i=0,n=bps;
+  while(n>=1024 && i<u.length-1){n/=1024;i++}
+  el.innerHTML=n.toFixed(n>=100||i===0?0:1)+" <small>"+u[i]+"</small>";
+}
+
+/* ---------------- status ---------------- */
+async function pollStatus(){
+  try{
+    const s=await (await fetch("/api/status")).json();
+    const led=$("led");
+    led.className="led "+(s.connected?"on":"err");
+    $("st-model").textContent=s.connected?(s.model||"online"):"offline";
+    $("st-op").textContent=s.operator?s.operator+(s.rat?" · "+s.rat:""):"—";
+    $("st-sim").textContent=s.sim||"—";
+    $("st-ip").textContent=s.wan_ip||"—";
+    $("st-rssi").textContent=s.rssi!==99?s.signal_pct+"%":"";
+    const bars=Math.round((s.signal_pct||0)/20);
+    [...$("sig").children].forEach((b,i)=>b.className=i<bars?"on":"");
+    if(s.own_number && !$("to").value) $("to").placeholder=s.own_number+"  (this SIM)";
+  }catch(e){ $("led").className="led err"; }
+}
+
+/* ---------------- traffic ---------------- */
+const cv=$("chart"), ctx=cv.getContext("2d");
+function drawChart(hist){
+  const W=cv.width=cv.clientWidth*devicePixelRatio,
+        H=cv.height=170*devicePixelRatio;
+  ctx.clearRect(0,0,W,H);
+  if(!hist||hist.length<2) return;
+  const max=Math.max(1024,...hist.map(p=>Math.max(p.rx,p.tx)))*1.15;
+  const x=i=>i/(hist.length-1)*W, y=v=>H-(v/max)*(H-14*devicePixelRatio)-2;
+  // grid
+  ctx.strokeStyle="rgba(87,227,137,.07)"; ctx.lineWidth=1;
+  for(let g=1;g<4;g++){ctx.beginPath();ctx.moveTo(0,H*g/4);ctx.lineTo(W,H*g/4);ctx.stroke();}
+  // rx area
+  ctx.beginPath(); ctx.moveTo(0,H);
+  hist.forEach((p,i)=>ctx.lineTo(x(i),y(p.rx))); ctx.lineTo(W,H); ctx.closePath();
+  const grad=ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,"rgba(87,227,137,.30)"); grad.addColorStop(1,"rgba(87,227,137,.02)");
+  ctx.fillStyle=grad; ctx.fill();
+  ctx.beginPath(); hist.forEach((p,i)=>i?ctx.lineTo(x(i),y(p.rx)):ctx.moveTo(x(i),y(p.rx)));
+  ctx.strokeStyle="#57e389"; ctx.lineWidth=1.5*devicePixelRatio; ctx.stroke();
+  // tx line
+  ctx.beginPath(); hist.forEach((p,i)=>i?ctx.lineTo(x(i),y(p.tx)):ctx.moveTo(x(i),y(p.tx)));
+  ctx.strokeStyle="#f0b13e"; ctx.lineWidth=1.2*devicePixelRatio; ctx.stroke();
+  // max label
+  ctx.fillStyle="rgba(140,170,150,.8)";
+  ctx.font=(10*devicePixelRatio)+"px IBM Plex Mono";
+  ctx.fillText("peak "+fmtBytes(max/1.15)+"/s",8*devicePixelRatio,12*devicePixelRatio);
+}
+function drawDays(days){
+  const el=$("days");
+  if(!days||!days.length){el.innerHTML="";return}
+  const max=Math.max(...days.map(d=>d.rx+d.tx),1);
+  el.innerHTML=days.map(d=>{
+    const tot=d.rx+d.tx, w=Math.max(1.5,tot/max*100), wtx=Math.max(0,d.tx/max*100);
+    return `<div class="dayrow"><span class="n">${d.day.slice(5)}</span>
+      <span class="bar"><i style="width:${w}%"></i><b style="width:${wtx}%"></b></span>
+      <span class="t">${fmtBytes(tot)}</span></div>`;
+  }).join("");
+}
+async function pollTraffic(){
+  try{
+    const t=await (await fetch("/api/traffic")).json();
+    fmtRate($("rate-rx"),t.rx_bps||0); fmtRate($("rate-tx"),t.tx_bps||0);
+    $("today").textContent=fmtBytes(t.today.rx+t.today.tx);
+    $("session").textContent=fmtBytes(t.session_rx+t.session_tx);
+    $("ifname").textContent=t.iface?(t.iface+(t.up?" · LINK UP":" · LINK DOWN")):"no interface";
+    drawChart(t.history); drawDays(t.days);
+  }catch(e){}
+}
+
+/* ---------------- sms ---------------- */
+const SMS_LIMIT=70;
+$("text").addEventListener("input",()=>{
+  const len=[...$("text").value].length;
+  $("count").textContent=len+" chars · "+Math.max(1,Math.ceil(len/SMS_LIMIT))+" sms";
+});
+$("smsform").addEventListener("submit",async ev=>{
+  ev.preventDefault();
+  const note=$("note"), btn=$("sendbtn");
+  note.className="note";
+  btn.disabled=true; btn.textContent="Transmitting…";
+  try{
+    const r=await fetch("/api/sms/send",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({to:$("to").value.trim(),text:$("text").value})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||r.statusText);
+    note.textContent="✓ sent — "+j.parts+" part(s), ref "+(j.refs||[]).join(",");
+    note.className="note ok";
+    $("text").value=""; $("count").textContent="0 chars · 1 sms";
+    setTimeout(loadInbox,4000);
+  }catch(e){
+    note.textContent="✗ "+e.message; note.className="note err";
+  }finally{
+    btn.disabled=false; btn.textContent="Transmit";
+  }
+});
+
+async function loadInbox(){
+  const box=$("inbox");
+  try{
+    const r=await fetch("/api/sms/inbox");
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||r.statusText);
+    $("inboxcnt").textContent=j.length+" msg";
+    box.innerHTML=j.length?j.map(m=>
+      `<div class="msg"><div class="meta"><span class="from">${esc(m.sender)}</span>
+       <span>${esc(m.timestamp)}</span></div>
+       <div class="body">${esc(m.text)}</div></div>`).join("")
+      :'<div class="empty">— inbox empty —</div>';
+  }catch(e){
+    box.innerHTML='<div class="empty">inbox unavailable: '+esc(e.message)+'</div>';
+  }
+}
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+$("refresh").addEventListener("click",loadInbox);
+
+/* ---------------- boot ---------------- */
+pollStatus(); pollTraffic(); loadInbox();
+setInterval(pollTraffic,3000);
+setInterval(pollStatus,12000);
+setInterval(loadInbox,60000);
+</script>
+</body>
+</html>
