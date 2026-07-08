@@ -60,6 +60,8 @@ func main() {
 	traffic.Start()
 	archiver := NewArchiver(modem, store, *archiveDelete)
 	archiver.Start()
+	watchdog := NewWatchdog(modem, traffic)
+	watchdog.Start()
 
 	srv := &http.Server{Addr: *addr, Handler: NewServer(modem, traffic, store, archiver).Handler()}
 
@@ -77,6 +79,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx) //nolint:errcheck
+	watchdog.Stop()
 	archiver.Stop()
 	traffic.Stop()
 	store.Close() //nolint:errcheck

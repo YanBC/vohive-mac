@@ -65,6 +65,8 @@ main.go      entrypoint + `at` CLI subcommand
 modem.go     raw-USB AT channel, SMS send (UCS2), storage access, status queries
 pdu.go       SMS-DELIVER PDU decoder
 ingest.go    SMS archiver: modem/SIM storage → SQLite (delete after archive)
+recovery.go  ECM link watchdog: USB-resets the dongle when the data link
+             stays down after sleep/wake (firmware never re-asserts it)
 db.go        SQLite store (messages + usage tables)
 traffic.go   interface-counter sampler, write-through daily usage persistence
 server.go    HTTP API + embedded static UI

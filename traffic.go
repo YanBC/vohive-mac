@@ -88,6 +88,18 @@ func resolveIface() string {
 	return ""
 }
 
+// linkActive reports whether the interface's link is actually up. The ECM
+// function asserts link state itself; after sleep/wake it can stay down
+// (ifconfig "status: inactive") even though the interface still exists and
+// netstat still lists it, so counter readability must not be used as "up".
+func linkActive(iface string) bool {
+	out, err := exec.Command("ifconfig", iface).Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "status: active")
+}
+
 // readCounters parses `netstat -ibn` for the interface's Link-level row.
 // Columns: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
 func readCounters(iface string) (rx, tx uint64, ok bool) {
@@ -163,7 +175,7 @@ func (t *TrafficTracker) sample() {
 		t.history = appendPoint(t.history, RatePoint{T: now.Unix()})
 		return
 	}
-	t.up = true
+	t.up = linkActive(t.iface)
 
 	if t.haveLast {
 		drx := counterDelta(rx, t.lastRx)
@@ -218,6 +230,14 @@ func appendPoint(h []RatePoint, p RatePoint) []RatePoint {
 		h = h[len(h)-historyLen:]
 	}
 	return h
+}
+
+// LinkState returns the resolved interface name and whether its link is up,
+// as of the last sample. Used by the ECM link watchdog.
+func (t *TrafficTracker) LinkState() (iface string, up bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.iface, t.up
 }
 
 func (t *TrafficTracker) Snapshot() TrafficSnapshot {

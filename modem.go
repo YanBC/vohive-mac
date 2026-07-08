@@ -192,6 +192,26 @@ func (m *Modem) Cmd(command string, timeout time.Duration) (string, error) {
 	return m.cmdLocked(command, timeout)
 }
 
+// ResetUSB issues a USB port reset, forcing macOS to drop and re-enumerate
+// the dongle — the only userspace way to revive the ECM data link when the
+// firmware fails to re-assert it after system sleep. The AT connection is
+// torn down; the next command reconnects once re-enumeration completes.
+func (m *Modem) ResetUSB() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.connectLocked(); err != nil {
+		return err
+	}
+	// Release our claimed interface/config first, keeping only the device
+	// handle: resetting with an interface claimed can fail outright.
+	m.intf.Close()
+	m.cfg.Close()
+	err := m.dev.Reset()
+	m.dev.Close()
+	m.dev, m.cfg, m.intf, m.in, m.out = nil, nil, nil, nil, nil
+	return err
+}
+
 func (m *Modem) Connected() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
