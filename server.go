@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log"
 	"net/http"
@@ -75,6 +76,53 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, msgs)
 }
 
+// handleData reads (GET) or sets (POST) the modem's cellular-data switch —
+// the firmware's autoconnect flag. Setting it reboots the modem, so the
+// dongle drops off the bus for ~20 s before the new state is observable.
+func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		enabled, supported, err := s.modem.DataEnabled()
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		if !supported {
+			writeErr(w, http.StatusNotImplemented,
+				errors.New(`firmware does not support AT+QCFG="qcautoconnect"`))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
+	case http.MethodPost:
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.modem.SetDataEnabled(req.Enabled); err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		log.Printf("cellular data switched %s (modem rebooting)", onOff(req.Enabled))
+		// drop the cached status so the UI sees the new state next poll
+		s.statusMu.Lock()
+		s.statusTime = time.Time{}
+		s.statusMu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
+	default:
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+	}
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -104,6 +152,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/traffic", s.handleTraffic)
+	mux.HandleFunc("/api/data", s.handleData)
 	mux.HandleFunc("/api/sms/inbox", s.handleInbox)
 	mux.HandleFunc("/api/sms/send", s.handleSend)
 

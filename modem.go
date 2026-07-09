@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
 
@@ -55,6 +56,12 @@ type Modem struct {
 
 	infoOnce  sync.Once
 	infoCache map[string]string
+
+	// last observed "cellular data disabled" state; see dataEnabledLocked.
+	dataOff atomic.Bool
+	// unix time until which a deliberate modem reboot (SetDataEnabled) is
+	// still settling; the ECM link being down before then is expected.
+	rebootUntil atomic.Int64
 }
 
 func NewModem() *Modem { return &Modem{} }
@@ -217,6 +224,79 @@ func (m *Modem) Connected() bool {
 	defer m.mu.Unlock()
 	return m.connectLocked() == nil
 }
+
+// --------------------------------------------------------------- data control
+//
+// Cellular data on this firmware is controlled by the "qcautoconnect" flag
+// (see docs/dongle-setup.md §3), which the router firmware reads only at
+// modem boot: with 0 it stops bridging the ECM LAN to the cellular bearer,
+// so no user traffic — and no data charges — is possible. The modem stays
+// registered (SMS keeps working; it rides the signaling/IMS path) and the
+// ECM interface keeps its LAN link and DHCP, it just forwards nothing.
+// Verified on the QDC507: a mere USB reset does NOT apply the flag, and
+// AT+CGACT=0,1 is refused (the router owns the session) — a CFUN=1,1
+// modem reboot is required. The setting lives in NV and survives replug
+// and reboot. Note the LTE default bearer still exists while registered,
+// so AT+CGPADDR keeps reporting a WAN IP even with data off.
+
+// dataEnabledLocked queries the autoconnect flag. supported=false means the
+// modem answered but rejected the command (non-Quectel-compatible firmware):
+// data is then uncontrollable by us and must be treated as "on", not "off".
+func (m *Modem) dataEnabledLocked() (enabled, supported bool, err error) {
+	resp, err := m.cmdLocked(`AT+QCFG="qcautoconnect"`, 5*time.Second)
+	if err != nil {
+		if strings.Contains(resp, "ERROR") {
+			return true, false, nil
+		}
+		return false, false, err
+	}
+	// +QCFG: "qcautoconnect",1
+	f := firstField(resp, "+QCFG:")
+	if i := strings.LastIndex(f, ","); i >= 0 {
+		enabled = strings.Trim(strings.TrimSpace(f[i+1:]), `"`) != "0"
+		m.dataOff.Store(!enabled)
+		return enabled, true, nil
+	}
+	return true, false, nil
+}
+
+// DataEnabled reports whether the modem will (auto)dial a data session.
+func (m *Modem) DataEnabled() (enabled, supported bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dataEnabledLocked()
+}
+
+// DataOff reports the last state observed by DataEnabled/SetDataEnabled
+// without touching the modem. Used by the ECM watchdog: a deliberately
+// disabled data link must not be "recovered" with USB resets.
+func (m *Modem) DataOff() bool { return m.dataOff.Load() }
+
+// SetDataEnabled flips the autoconnect flag and reboots the modem
+// (AT+CFUN=1,1 — the only way the flag takes effect, see above). The dongle
+// is off the bus for ~20 s afterwards; the next command reconnects.
+func (m *Modem) SetDataEnabled(enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	val := 0
+	if enabled {
+		val = 1
+	}
+	if _, err := m.cmdLocked(fmt.Sprintf(`AT+QCFG="qcautoconnect",%d`, val), 5*time.Second); err != nil {
+		return err
+	}
+	m.dataOff.Store(!enabled)
+	if _, err := m.cmdLocked("AT+CFUN=1,1", 10*time.Second); err != nil {
+		return err
+	}
+	m.rebootUntil.Store(time.Now().Add(45 * time.Second).Unix())
+	m.disconnectLocked() // the device is about to fall off the bus
+	return nil
+}
+
+// Rebooting reports whether a deliberate modem reboot is still settling.
+// The ECM watchdog must not "recover" the expected link-down of a reboot.
+func (m *Modem) Rebooting() bool { return time.Now().Unix() < m.rebootUntil.Load() }
 
 // ------------------------------------------------- SMS send (text mode, UCS2)
 
@@ -394,6 +474,8 @@ type Status struct {
 	RAT       string `json:"rat,omitempty"`
 	SIM       string `json:"sim,omitempty"`
 	WanIP     string `json:"wan_ip,omitempty"`
+	// nil when the firmware doesn't support the autoconnect toggle
+	DataEnabled *bool `json:"data_enabled,omitempty"`
 }
 
 func firstField(resp, prefix string) string {
@@ -475,6 +557,9 @@ func (m *Modem) Status() Status {
 		st.SIM = firstField(r, "+CPIN:")
 	} else {
 		st.SIM = "ERROR"
+	}
+	if en, ok, err := m.dataEnabledLocked(); err == nil && ok {
+		st.DataEnabled = &en
 	}
 	if r, err := m.cmdLocked("AT+CGPADDR=1", 4*time.Second); err == nil {
 		if f := firstField(r, "+CGPADDR:"); strings.Contains(f, ",") {

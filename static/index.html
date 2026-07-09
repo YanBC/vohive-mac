@@ -124,6 +124,16 @@ button:hover{box-shadow:0 0 18px rgba(87,227,137,.45)}
 button:disabled{background:var(--faint); color:var(--dim); cursor:wait; box-shadow:none}
 button.ghost{background:transparent; color:var(--dim); border:1px solid var(--line); padding:6px 12px; font-size:9px; margin-left:0}
 button.ghost:hover{color:var(--ph); border-color:var(--ph-dim)}
+/* cellular data switch: lit like an indicator lamp when on, dark when off */
+#databtn{transition:.25s}
+#databtn.on{
+  color:var(--ph); border-color:var(--ph-dim); background:rgba(87,227,137,.10);
+  box-shadow:0 0 14px rgba(87,227,137,.35), inset 0 0 8px rgba(87,227,137,.12);
+  text-shadow:0 0 8px rgba(87,227,137,.8);
+}
+#databtn.on:hover{border-color:var(--ph); box-shadow:0 0 18px rgba(87,227,137,.5), inset 0 0 8px rgba(87,227,137,.12)}
+#databtn.off{color:var(--faint); border-color:var(--line); background:rgba(0,0,0,.35); box-shadow:none; opacity:.65}
+#databtn.off:hover{opacity:1; color:var(--dim); border-color:var(--faint)}
 .note{font-size:11px; padding:9px 12px; border:1px solid var(--line); display:none; white-space:pre-wrap}
 .note.ok{display:block; color:var(--ph); border-color:var(--ph-dim); background:rgba(87,227,137,.06)}
 .note.err{display:block; color:var(--red); border-color:#5c2626; background:rgba(224,85,85,.07)}
@@ -168,7 +178,10 @@ footer{margin-top:22px; font-size:10px; color:var(--faint); letter-spacing:.15em
 
 <main>
   <section class="panel"><span class="tick"></span>
-    <h2>Data Usage</h2>
+    <div class="inboxhead" style="margin:0 0 16px">
+      <h2 style="margin:0;flex:1">Data Usage</h2>
+      <button class="ghost" type="button" id="databtn" hidden>data: —</button>
+    </div>
     <div class="bignums">
       <div class="big rx"><div class="k">▼ down</div><div class="v" id="rate-rx">0 <small>B/s</small></div></div>
       <div class="big tx"><div class="k">▲ up</div><div class="v" id="rate-tx">0 <small>B/s</small></div></div>
@@ -237,8 +250,44 @@ async function pollStatus(){
     const bars=Math.round((s.signal_pct||0)/20);
     [...$("sig").children].forEach((b,i)=>b.className=i<bars?"on":"");
     if(s.own_number && !$("to").value) $("to").placeholder=s.own_number+"  (this SIM)";
+    if(!dataBusy && typeof s.data_enabled==="boolean"){dataEnabled=s.data_enabled; renderData();}
   }catch(e){ $("led").className="led err"; }
 }
+
+/* ---------------- cellular data switch ---------------- */
+let dataEnabled=null, dataBusy=false;
+function renderData(){
+  const b=$("databtn");
+  if(dataEnabled===null && !dataBusy){b.hidden=true; return}
+  b.hidden=false;
+  b.disabled=dataBusy;
+  b.textContent=dataBusy?"switching…":"data: "+(dataEnabled?"on":"off");
+  b.classList.toggle("on",!dataBusy && dataEnabled);
+  b.classList.toggle("off",!dataBusy && !dataEnabled);
+}
+$("databtn").addEventListener("click",async()=>{
+  if(dataBusy || dataEnabled===null) return;
+  const target=!dataEnabled;
+  const msg=target
+    ?"Turn cellular data ON?\n\nThe dongle will reboot and reconnect (~20 s)."
+    :"Turn cellular data OFF?\n\nSMS keeps working, but no data traffic (or charges) is possible until re-enabled. The setting survives replug and reboot. The dongle will reboot (~20 s).";
+  if(!confirm(msg)) return;
+  dataBusy=true; renderData();
+  try{
+    const r=await fetch("/api/data",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({enabled:target})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||r.statusText);
+    dataEnabled=j.enabled;
+  }catch(e){
+    alert("data switch failed: "+e.message);
+    dataBusy=false; renderData();
+    return;
+  }
+  // the toggle reboots the dongle; let it re-enumerate before trusting status
+  setTimeout(()=>{dataBusy=false; renderData(); pollStatus();},25000);
+});
 
 /* ---------------- traffic ---------------- */
 const cv=$("chart"), ctx=cv.getContext("2d");

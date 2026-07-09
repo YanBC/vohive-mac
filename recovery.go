@@ -93,6 +93,13 @@ func (w *Watchdog) run() {
 			downSince = time.Time{}
 			continue
 		}
+		// Link down because cellular data is deliberately disabled, or
+		// because a commanded modem reboot (data toggle) is still settling,
+		// is the expected state, not a wedged ECM — never reset for it.
+		if w.modem.DataOff() || w.modem.Rebooting() {
+			downSince = time.Time{}
+			continue
+		}
 		if downSince.IsZero() {
 			downSince = time.Now()
 			continue
@@ -103,7 +110,16 @@ func (w *Watchdog) run() {
 		}
 		// Only reset if the modem still answers on the AT port; if it
 		// doesn't, the dongle is likely unplugged and a reset is pointless.
-		if _, err := w.modem.Cmd("AT", 3*time.Second); err != nil {
+		// The data-enabled query doubles as the aliveness probe and covers
+		// the case where data was disabled before this process started
+		// (DataOff above knows nothing until the modem has been asked once).
+		enabled, _, err := w.modem.DataEnabled()
+		if err != nil {
+			continue
+		}
+		if !enabled {
+			log.Printf("watchdog: %s link down but cellular data is disabled — leaving it alone", iface)
+			downSince = time.Time{}
 			continue
 		}
 		log.Printf("watchdog: %s link down for %s but modem alive — resetting USB device",
