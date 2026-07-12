@@ -56,14 +56,21 @@ func main() {
 		log.Fatalf("open store: %v", err)
 	}
 	modem := NewModem()
-	traffic := NewTrafficTracker(store)
+	sims := NewSIMRegistry(modem, store)
+	// resolve the card before anything writes a SIM-scoped row, so the first
+	// bytes and messages of the process are attributed to it rather than to
+	// the unknown SIM (if the dongle is absent, the poller picks it up later)
+	sims.Refresh()
+	sims.Start()
+	traffic := NewTrafficTracker(store, sims)
 	traffic.Start()
-	archiver := NewArchiver(modem, store, *archiveDelete)
+	archiver := NewArchiver(modem, store, sims, *archiveDelete)
 	archiver.Start()
 	watchdog := NewWatchdog(modem, traffic)
 	watchdog.Start()
 
-	srv := &http.Server{Addr: *addr, Handler: NewServer(modem, traffic, store, archiver).Handler()}
+	srv := &http.Server{Addr: *addr,
+		Handler: NewServer(modem, traffic, store, archiver, sims).Handler()}
 
 	go func() {
 		log.Printf("vohive-mac listening on http://%s", *addr)
@@ -81,6 +88,7 @@ func main() {
 	srv.Shutdown(ctx) //nolint:errcheck
 	watchdog.Stop()
 	archiver.Stop()
+	sims.Stop()
 	traffic.Stop()
 	store.Close() //nolint:errcheck
 }

@@ -144,11 +144,34 @@ button.ghost:hover{color:var(--ph); border-color:var(--ph-dim)}
 .msg{border:1px solid var(--line); border-left:2px solid var(--ph-dim);
   background:rgba(0,0,0,.25); padding:9px 12px}
 .msg.out{border-left-color:var(--amber)}
-.msg .meta{display:flex; gap:12px; font-size:10px; color:var(--dim); margin-bottom:4px; letter-spacing:.06em}
+.msg .meta{display:flex; gap:12px; font-size:10px; color:var(--dim); margin-bottom:4px; letter-spacing:.06em; align-items:center}
+.msg .meta span{white-space:nowrap}
+.msg .meta .from{overflow:hidden; text-overflow:ellipsis}
 .msg .meta .from{color:var(--amber)}
 .msg.out .meta .from{color:var(--ph)}
 .msg .body{font-size:13px; color:#dfeee2; word-break:break-word; white-space:pre-wrap}
 .empty{color:var(--faint); font-size:12px; padding:14px 0; text-align:center; letter-spacing:.15em}
+
+/* ---------- sim selector ---------- */
+[hidden]{display:none !important} /* .movebar's display:flex would win otherwise */
+select{
+  background:rgba(0,0,0,.35); border:1px solid var(--line); color:#eafff0;
+  font-family:var(--mono); font-size:12px; padding:6px 9px; outline:none; border-radius:0;
+  min-width:0; max-width:100%;
+}
+select:focus{border-color:var(--ph-dim)}
+.simbar{display:flex; align-items:center; gap:10px; margin:0 0 18px; flex-wrap:wrap;
+  border:1px solid var(--line); background:rgba(0,0,0,.2); padding:9px 12px}
+.simbar .k{font-size:9px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase; white-space:nowrap}
+.simbar .hist{font-size:10px; color:var(--amber); letter-spacing:.12em}
+.msg .meta .box{width:auto; margin:0 0 0 auto; accent-color:#57e389; flex:none} /* input{width:100%} is for the send form */
+.movebar{
+  display:flex; align-items:center; gap:8px; font-size:11px; color:var(--amber);
+  border:1px solid var(--amber); background:rgba(240,177,62,.07); padding:8px 10px; margin-bottom:8px;
+}
+.movebar #movecnt{white-space:nowrap; flex:none}
+.movebar select{flex:0 1 auto; width:auto} /* min-width:0 lets it shrink instead of wrapping */
+.movebar button{margin-left:0; padding:5px 12px; font-size:9px; flex:none}
 
 footer{margin-top:22px; font-size:10px; color:var(--faint); letter-spacing:.15em; text-align:center}
 ::-webkit-scrollbar{width:8px; height:8px}
@@ -175,6 +198,13 @@ footer{margin-top:22px; font-size:10px; color:var(--faint); letter-spacing:.15em
       <span id="st-rssi" style="font-size:10px;color:var(--dim)"></span></span></div>
   </div>
 </header>
+
+<div class="simbar">
+  <span class="k">card</span>
+  <select id="simsel" title="messages and data usage are recorded per SIM"></select>
+  <button class="ghost" type="button" id="renamesim">rename</button>
+  <span class="hist" id="simhist" hidden>◂ history only — not the card in the dongle</span>
+</div>
 
 <main>
   <section class="panel"><span class="tick"></span>
@@ -213,6 +243,12 @@ footer{margin-top:22px; font-size:10px; color:var(--faint); letter-spacing:.15em
       <span class="cnt" id="inboxcnt"></span>
       <button class="ghost" type="button" id="refresh">refresh</button>
     </div>
+    <div class="movebar" id="movebar" hidden>
+      <span id="movecnt">0 selected</span>
+      <select id="movesim"></select>
+      <button type="button" id="movego">move</button>
+      <button class="ghost" type="button" id="moveclear">clear</button>
+    </div>
     <div id="inbox"><div class="empty">loading…</div></div>
   </section>
 </main>
@@ -235,6 +271,50 @@ function fmtRate(el,bps){
   while(n>=1024 && i<u.length-1){n/=1024;i++}
   el.innerHTML=n.toFixed(n>=100||i===0?0:1)+" <small>"+u[i]+"</small>";
 }
+
+/* ---------------- sims ----------------
+   Messages and usage are recorded per SIM (keyed on ICCID, not on the phone
+   number — many SIMs report no number). `viewSim` is the card being looked at;
+   it defaults to the one in the dongle but can be any card ever seen. */
+let sims=[], currentSim=null, viewSim=null;
+const simName=s=>s.label||s.number||s.iccid||("sim "+s.id);
+const isCurrent=()=>viewSim===currentSim;
+
+async function loadSims(){
+  try{
+    const j=await (await fetch("/api/sims")).json();
+    currentSim=j.current;
+    // the "unknown SIM" bucket is only worth showing when something is in it
+    sims=(j.sims||[]).filter(s=>s.id!==0||s.messages>0||s.bytes>0||s.id===currentSim);
+    if(viewSim===null||!sims.some(s=>s.id===viewSim)) viewSim=currentSim;
+    const opts=sims.map(s=>{
+      const tag=s.id===currentSim?" ● in dongle":(s.messages?" · "+s.messages+" msg":"");
+      return `<option value="${s.id}">${esc(simName(s))}${esc(tag)}</option>`;
+    }).join("");
+    $("simsel").innerHTML=opts; $("simsel").value=String(viewSim);
+    $("movesim").innerHTML=opts;
+    $("simhist").hidden=isCurrent();
+  }catch(e){}
+}
+$("simsel").addEventListener("change",()=>{
+  viewSim=Number($("simsel").value);
+  $("simhist").hidden=isCurrent();
+  clearSelection();
+  pollTraffic(); loadInbox();
+});
+$("renamesim").addEventListener("click",async()=>{
+  const sim=sims.find(s=>s.id===viewSim);
+  if(!sim) return;
+  const label=prompt("Name for this SIM:",simName(sim));
+  if(label===null) return;
+  try{
+    const r=await fetch("/api/sims",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sim_id:viewSim,label:label.trim()})});
+    if(!r.ok) throw new Error((await r.json()).error||r.statusText);
+    await loadSims();
+  }catch(e){ alert("rename failed: "+e.message); }
+});
 
 /* ---------------- status ---------------- */
 async function pollStatus(){
@@ -330,11 +410,15 @@ function drawDays(days){
 }
 async function pollTraffic(){
   try{
-    const t=await (await fetch("/api/traffic")).json();
+    const q=viewSim===null?"":"?sim="+viewSim;
+    const t=await (await fetch("/api/traffic"+q)).json();
     fmtRate($("rate-rx"),t.rx_bps||0); fmtRate($("rate-tx"),t.tx_bps||0);
     $("today").textContent=fmtBytes(t.today.rx+t.today.tx);
-    $("session").textContent=fmtBytes(t.session_rx+t.session_tx);
-    $("ifname").textContent=t.iface?(t.iface+(t.up?" · LINK UP":" · LINK DOWN")):"no interface";
+    // live rates, session bytes and the interface belong to the card that is
+    // actually online; for any other SIM only the stored history exists
+    $("session").textContent=isCurrent()?fmtBytes(t.session_rx+t.session_tx):"—";
+    $("ifname").textContent=!isCurrent()?"stored history"
+      :t.iface?(t.iface+(t.up?" · LINK UP":" · LINK DOWN")):"no interface";
     drawChart(t.history); drawDays(t.days);
   }catch(e){}
 }
@@ -370,7 +454,8 @@ $("smsform").addEventListener("submit",async ev=>{
 async function loadInbox(){
   const box=$("inbox");
   try{
-    const r=await fetch("/api/sms/inbox");
+    const q=viewSim===null?"":"?sim="+viewSim;
+    const r=await fetch("/api/sms/inbox"+q);
     const j=await r.json();
     if(!r.ok) throw new Error(j.error||r.statusText);
     $("inboxcnt").textContent=j.length+" msg";
@@ -378,21 +463,59 @@ async function loadInbox(){
       const out=m.direction==="out";
       return `<div class="msg${out?" out":""}"><div class="meta">
        <span class="from">${out?"→ ":""}${esc(m.peer)}</span>
-       <span>${esc(m.timestamp)}</span></div>
+       <span>${esc(m.timestamp)}</span>
+       <input type="checkbox" class="box" data-id="${m.id}" title="select to move to another SIM"></div>
        <div class="body">${esc(m.body)}</div></div>`;}).join("")
       :'<div class="empty">— no messages —</div>';
+    box.querySelectorAll(".box").forEach(b=>b.addEventListener("change",renderMovebar));
   }catch(e){
     box.innerHTML='<div class="empty">inbox unavailable: '+esc(e.message)+'</div>';
   }
+  renderMovebar();
 }
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 $("refresh").addEventListener("click",loadInbox);
 
+/* ------------- re-filing messages onto another SIM -------------
+   The archive drained off the hardware can hold messages received under a card
+   that was in the dongle long before this app existed, and they are attributed
+   by guesswork. This is the correction. */
+const selectedIDs=()=>[...document.querySelectorAll("#inbox .box:checked")]
+  .map(b=>Number(b.dataset.id));
+function renderMovebar(){
+  const n=selectedIDs().length;
+  $("movebar").hidden=n===0;
+  $("movecnt").textContent=n+" selected →";
+}
+function clearSelection(){
+  document.querySelectorAll("#inbox .box:checked").forEach(b=>{b.checked=false});
+  renderMovebar();
+}
+$("moveclear").addEventListener("click",clearSelection);
+$("movego").addEventListener("click",async()=>{
+  const ids=selectedIDs(), target=Number($("movesim").value);
+  if(!ids.length) return;
+  const sim=sims.find(s=>s.id===target);
+  if(!confirm(`Move ${ids.length} message(s) to "${sim?simName(sim):target}"?`)) return;
+  try{
+    const r=await fetch("/api/sms/move",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ids:ids,sim_id:target})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||r.statusText);
+    if(j.skipped) alert(`moved ${j.moved}; skipped ${j.skipped} already on that SIM`);
+    clearSelection();
+    await loadSims(); await loadInbox();
+  }catch(e){ alert("move failed: "+e.message); }
+});
+
 /* ---------------- boot ---------------- */
-pollStatus(); pollTraffic(); loadInbox();
+loadSims().then(()=>{ pollTraffic(); loadInbox(); });
+pollStatus();
 setInterval(pollTraffic,3000);
 setInterval(pollStatus,12000);
 setInterval(loadInbox,60000);
+setInterval(loadSims,30000);
 </script>
 </body>
 </html>

@@ -54,8 +54,15 @@ type Modem struct {
 	in   *gousb.InEndpoint
 	out  *gousb.OutEndpoint
 
+	// hardware identity: fixed for the life of the dongle, read once
 	infoOnce  sync.Once
 	infoCache map[string]string
+
+	// SIM identity: NOT fixed — the card can be swapped under us, so this is
+	// re-validated against the ICCID on a TTL rather than cached forever.
+	simCache SIMIdentity
+	simOK    bool
+	simTime  time.Time
 
 	// last observed "cellular data disabled" state; see dataEnabledLocked.
 	dataOff atomic.Bool
@@ -460,6 +467,135 @@ func (m *Modem) DeleteMessages(storage string, indexes []int) error {
 	return nil
 }
 
+// -------------------------------------------------------------- SIM identity
+
+// simCacheTTL bounds how stale a SIM identity may be. Every refresh re-reads
+// the ICCID (one AT command), so a card swap is noticed within this window.
+const simCacheTTL = 30 * time.Second
+
+// SIMIdentity is the card currently in the dongle. ICCID is the identity: it
+// is printed on the card and always readable. Number (AT+CNUM) is blank on
+// most prepaid/MVNO SIMs — treat it as a label, never as a key.
+type SIMIdentity struct {
+	ICCID    string `json:"iccid"`
+	IMSI     string `json:"imsi,omitempty"`
+	Number   string `json:"number,omitempty"`
+	Operator string `json:"operator,omitempty"`
+}
+
+// defaultLabel is what the UI shows for a SIM until the user renames it.
+func (s SIMIdentity) defaultLabel() string {
+	if s.Number != "" {
+		return s.Number
+	}
+	tail := s.ICCID
+	if len(tail) > 6 {
+		tail = "…" + tail[len(tail)-6:]
+	}
+	if s.Operator != "" {
+		return s.Operator + " " + tail
+	}
+	return tail
+}
+
+// digitsOf keeps the characters an ICCID/IMSI may contain (ICCIDs are
+// sometimes padded with 'F' nibbles) and drops AT framing noise.
+func digitsOf(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == 'F' || r == 'f':
+			b.WriteRune('F')
+		}
+	}
+	return b.String()
+}
+
+// readICCIDLocked tries the vendor variants in turn; firmwares disagree on
+// which one they answer to.
+func (m *Modem) readICCIDLocked() string {
+	for _, cmd := range []string{"AT+QCCID", "AT+CCID", "AT+ICCID"} {
+		resp, err := m.cmdLocked(cmd, 5*time.Second)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(resp, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || line == "OK" || strings.HasPrefix(line, "AT") {
+				continue
+			}
+			for _, p := range []string{"+QCCID:", "+CCID:", "+ICCID:"} {
+				line = strings.TrimPrefix(line, p)
+			}
+			if d := digitsOf(line); len(d) >= 18 {
+				return d
+			}
+		}
+	}
+	return ""
+}
+
+// simInfoLocked returns the current SIM, re-reading it when the cache expires.
+// A cheap ICCID read decides whether the rest is still valid, so the common
+// case (same card) costs one AT command per TTL.
+func (m *Modem) simInfoLocked() (SIMIdentity, error) {
+	if m.simOK && time.Since(m.simTime) < simCacheTTL {
+		return m.simCache, nil
+	}
+	if m.Rebooting() {
+		if m.simOK {
+			return m.simCache, nil // the card cannot have changed mid-reboot
+		}
+		return SIMIdentity{}, fmt.Errorf("modem rebooting")
+	}
+
+	iccid := m.readICCIDLocked()
+	if iccid == "" {
+		m.simOK = false
+		return SIMIdentity{}, fmt.Errorf("no SIM (ICCID unreadable)")
+	}
+	// Same card, and we already have a number for it: nothing else to read.
+	// A blank cached number is re-queried — CNUM can start answering once the
+	// SIM registers on the network.
+	if m.simOK && iccid == m.simCache.ICCID && m.simCache.Number != "" {
+		m.simTime = time.Now()
+		return m.simCache, nil
+	}
+
+	id := SIMIdentity{ICCID: iccid}
+	if r, err := m.cmdLocked("AT+CIMI", 4*time.Second); err == nil {
+		for _, line := range strings.Split(r, "\n") {
+			if d := digitsOf(strings.TrimSpace(line)); len(d) >= 14 && len(d) <= 15 {
+				id.IMSI = d
+				break
+			}
+		}
+	}
+	if r, err := m.cmdLocked("AT+CNUM", 4*time.Second); err == nil {
+		if f := firstField(r, "+CNUM:"); f != "" {
+			if fields := strings.Split(f, ","); len(fields) >= 2 {
+				id.Number = strings.Trim(fields[1], `" `)
+			}
+		}
+	}
+	if r, err := m.cmdLocked("AT+COPS?", 4*time.Second); err == nil {
+		if f := firstField(r, "+COPS:"); strings.Contains(f, `"`) {
+			id.Operator = strings.SplitN(f, `"`, 3)[1]
+		}
+	}
+	m.simCache, m.simOK, m.simTime = id, true, time.Now()
+	return id, nil
+}
+
+// SIMInfo returns the SIM currently in the dongle.
+func (m *Modem) SIMInfo() (SIMIdentity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.simInfoLocked()
+}
+
 // ------------------------------------------------------------------- status
 
 type Status struct {
@@ -468,6 +604,7 @@ type Status struct {
 	Model     string `json:"model,omitempty"`
 	IMEI      string `json:"imei,omitempty"`
 	OwnNumber string `json:"own_number,omitempty"`
+	ICCID     string `json:"iccid,omitempty"`
 	RSSI      int    `json:"rssi"`
 	SignalPct int    `json:"signal_pct"`
 	Operator  string `json:"operator,omitempty"`
@@ -521,17 +658,15 @@ func (m *Modem) Status() Status {
 				}
 			}
 		}
-		if r, err := m.cmdLocked("AT+CNUM", 4*time.Second); err == nil {
-			if f := firstField(r, "+CNUM:"); f != "" {
-				if fields := strings.Split(f, ","); len(fields) >= 2 {
-					m.infoCache["own_number"] = strings.Trim(fields[1], `" `)
-				}
-			}
-		}
 	})
 	st.Model = m.infoCache["model"]
 	st.IMEI = m.infoCache["imei"]
-	st.OwnNumber = m.infoCache["own_number"]
+
+	// the SIM (unlike the IMEI/model) can be swapped, so this is TTL-cached
+	if sim, err := m.simInfoLocked(); err == nil {
+		st.OwnNumber = sim.Number
+		st.ICCID = sim.ICCID
+	}
 
 	if r, err := m.cmdLocked("AT+CSQ", 4*time.Second); err == nil {
 		if f := firstField(r, "+CSQ:"); f != "" {

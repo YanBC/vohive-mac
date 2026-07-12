@@ -25,6 +25,7 @@ var smsStorages = []string{"SM", "ME"}
 type Archiver struct {
 	modem       *Modem
 	store       *Store
+	sims        *SIMRegistry
 	deleteAfter bool
 
 	mu       sync.Mutex
@@ -32,8 +33,8 @@ type Archiver struct {
 	stop     chan struct{}
 }
 
-func NewArchiver(m *Modem, s *Store, deleteAfter bool) *Archiver {
-	return &Archiver{modem: m, store: s, deleteAfter: deleteAfter,
+func NewArchiver(m *Modem, s *Store, sims *SIMRegistry, deleteAfter bool) *Archiver {
+	return &Archiver{modem: m, store: s, sims: sims, deleteAfter: deleteAfter,
 		stop: make(chan struct{})}
 }
 
@@ -84,9 +85,16 @@ func (a *Archiver) syncStorage(storage string) error {
 		return nil
 	}
 
+	// Messages are credited to the SIM now in the dongle. For "SM" that is
+	// exact — the storage is on the card itself. For "ME" (modem flash) it is
+	// an assumption: a message received under a previous card and never drained
+	// would be credited to the current one. Draining every 60 s keeps that
+	// window to messages that arrived while the app was not running.
+	simID := a.sims.CurrentID()
+
 	var deletable []int
 	archive := func(sender, ts, body string, indexes ...int) {
-		fresh, err := a.store.ArchiveInbound(sender, ts, body)
+		fresh, err := a.store.ArchiveInbound(simID, sender, ts, body)
 		if err != nil {
 			log.Printf("archive from %s failed: %v", storage, err)
 			return // keep on modem; retry next sync

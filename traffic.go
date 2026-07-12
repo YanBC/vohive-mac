@@ -36,6 +36,7 @@ type DayUsage struct {
 }
 
 type TrafficSnapshot struct {
+	SimID     int64       `json:"sim_id"`
 	Iface     string      `json:"iface"`
 	Up        bool        `json:"up"`
 	SessionRx uint64      `json:"session_rx"`
@@ -48,8 +49,15 @@ type TrafficSnapshot struct {
 }
 
 type TrafficTracker struct {
-	mu        sync.Mutex
-	store     *Store
+	mu    sync.Mutex
+	store *Store
+	sims  *SIMRegistry
+
+	// bytes are attributed to whichever SIM was in the dongle when they were
+	// counted; simID/today are rebound when the card or the day changes.
+	simID     int64
+	bound     bool
+	today     DayUsage
 	iface     string
 	up        bool
 	lastRx    uint64
@@ -58,20 +66,15 @@ type TrafficTracker struct {
 	lastTime  time.Time
 	sessionRx uint64
 	sessionTx uint64
-	today     DayUsage
 	history   []RatePoint
 	lastSave  time.Time
 	stop      chan struct{}
 }
 
-func NewTrafficTracker(store *Store) *TrafficTracker {
-	day := time.Now().Format("2006-01-02")
-	today, err := store.GetDayUsage(day)
-	if err != nil {
-		log.Printf("load today's usage: %v", err)
-		today = DayUsage{Day: day}
-	}
-	return &TrafficTracker{store: store, today: today, stop: make(chan struct{})}
+func NewTrafficTracker(store *Store, sims *SIMRegistry) *TrafficTracker {
+	// today's totals are loaded on the first sample, once the SIM is known
+	return &TrafficTracker{store: store, sims: sims, simID: unknownSIM,
+		stop: make(chan struct{})}
 }
 
 var bsdNameRe = regexp.MustCompile(`"BSD Name"\s*=\s*"(en\d+)"`)
@@ -149,20 +152,42 @@ func (t *TrafficTracker) Stop() {
 }
 
 func (t *TrafficTracker) persistLocked() {
-	if err := t.store.SetDayUsage(t.today); err != nil {
+	if !t.bound {
+		return // nothing accumulated yet
+	}
+	if err := t.store.SetDayUsage(t.simID, t.today); err != nil {
 		log.Printf("persist usage: %v", err)
 	}
 	t.lastSave = time.Now()
 }
 
+// rebindLocked closes out the accumulation in progress and starts one for
+// (simID, day), seeded with whatever the store already holds for that pair.
+func (t *TrafficTracker) rebindLocked(simID int64, day string) {
+	swapped := t.bound && simID != t.simID
+	t.persistLocked() // close out the finished day / the outgoing SIM
+	if swapped {
+		t.sessionRx, t.sessionTx = 0, 0 // a session belongs to one SIM
+	}
+	today, err := t.store.GetDayUsage(simID, day)
+	if err != nil {
+		log.Printf("load usage for sim %d on %s: %v", simID, day, err)
+		today = DayUsage{Day: day}
+	}
+	t.simID, t.today, t.bound = simID, today, true
+}
+
 func (t *TrafficTracker) sample() {
+	// read outside the lock: the registry never touches the AT port here, but
+	// this keeps the sampler's critical section free of any cross-component call
+	simID := t.sims.CurrentID()
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := time.Now()
-	if day := now.Format("2006-01-02"); day != t.today.Day {
-		t.persistLocked() // close out the finished day
-		t.today = DayUsage{Day: day}
+	if day := now.Format("2006-01-02"); !t.bound || simID != t.simID || day != t.today.Day {
+		t.rebindLocked(simID, day)
 	}
 
 	if t.iface == "" {
@@ -244,28 +269,33 @@ func (t *TrafficTracker) Snapshot() TrafficSnapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	today := t.today
+	if !t.bound { // no sample has landed yet
+		today = DayUsage{Day: time.Now().Format("2006-01-02")}
+	}
 	snap := TrafficSnapshot{
+		SimID:     t.simID,
 		Iface:     t.iface,
 		Up:        t.up,
 		SessionRx: t.sessionRx,
 		SessionTx: t.sessionTx,
-		Today:     t.today,
+		Today:     today,
 		History:   append([]RatePoint(nil), t.history...),
 	}
-	days, err := t.store.RecentDays(14)
+	days, err := t.store.RecentDays(t.simID, 14)
 	if err != nil {
 		log.Printf("recent days: %v", err)
 	}
 	// the DB may lag the in-memory today by up to persistEvery
 	found := false
 	for i := range days {
-		if days[i].Day == t.today.Day {
-			days[i] = t.today
+		if days[i].Day == today.Day {
+			days[i] = today
 			found = true
 		}
 	}
 	if !found {
-		days = append([]DayUsage{t.today}, days...)
+		days = append([]DayUsage{today}, days...)
 	}
 	snap.Days = days
 	if n := len(t.history); n > 0 {
