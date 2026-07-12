@@ -35,6 +35,12 @@ type DayUsage struct {
 	Tx  uint64 `json:"tx"`
 }
 
+type MonthUsage struct {
+	Month string `json:"month"` // "2006-01"
+	Rx    uint64 `json:"rx"`
+	Tx    uint64 `json:"tx"`
+}
+
 type TrafficSnapshot struct {
 	SimID     int64       `json:"sim_id"`
 	Iface     string      `json:"iface"`
@@ -42,6 +48,7 @@ type TrafficSnapshot struct {
 	SessionRx uint64      `json:"session_rx"`
 	SessionTx uint64      `json:"session_tx"`
 	Today     DayUsage    `json:"today"`
+	Month     MonthUsage  `json:"month"`
 	Days      []DayUsage  `json:"days"`
 	History   []RatePoint `json:"history"`
 	RxBps     float64     `json:"rx_bps"`
@@ -257,6 +264,21 @@ func appendPoint(h []RatePoint, p RatePoint) []RatePoint {
 	return h
 }
 
+// monthUsage totals the calendar month that `today` falls in: the store's rows
+// for the other days plus the given today, whose in-memory copy can be ahead
+// of its write-through row.
+func monthUsage(store *Store, simID int64, today DayUsage) MonthUsage {
+	m := MonthUsage{Month: today.Day[:7], Rx: today.Rx, Tx: today.Tx}
+	rx, tx, err := store.MonthUsage(simID, m.Month, today.Day)
+	if err != nil {
+		log.Printf("month usage: %v", err)
+		return m
+	}
+	m.Rx += rx
+	m.Tx += tx
+	return m
+}
+
 // LinkState returns the resolved interface name and whether its link is up,
 // as of the last sample. Used by the ECM link watchdog.
 func (t *TrafficTracker) LinkState() (iface string, up bool) {
@@ -298,6 +320,7 @@ func (t *TrafficTracker) Snapshot() TrafficSnapshot {
 		days = append([]DayUsage{today}, days...)
 	}
 	snap.Days = days
+	snap.Month = monthUsage(t.store, t.simID, today)
 	if n := len(t.history); n > 0 {
 		snap.RxBps = t.history[n-1].Rx
 		snap.TxBps = t.history[n-1].Tx

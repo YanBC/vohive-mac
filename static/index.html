@@ -216,6 +216,7 @@ footer{margin-top:22px; font-size:10px; color:var(--faint); letter-spacing:.15em
       <div class="big rx"><div class="k">▼ down</div><div class="v" id="rate-rx">0 <small>B/s</small></div></div>
       <div class="big tx"><div class="k">▲ up</div><div class="v" id="rate-tx">0 <small>B/s</small></div></div>
       <div class="big"><div class="k">today</div><div class="v" id="today">—</div></div>
+      <div class="big"><div class="k" id="month-k">month</div><div class="v" id="month">—</div></div>
       <div class="big"><div class="k">session</div><div class="v" id="session">—</div></div>
     </div>
     <canvas id="chart" width="800" height="170"></canvas>
@@ -414,6 +415,10 @@ async function pollTraffic(){
     const t=await (await fetch("/api/traffic"+q)).json();
     fmtRate($("rate-rx"),t.rx_bps||0); fmtRate($("rate-tx"),t.tx_bps||0);
     $("today").textContent=fmtBytes(t.today.rx+t.today.tx);
+    if(t.month){
+      $("month-k").textContent="month "+t.month.month.slice(5); // e.g. "month 07"
+      $("month").textContent=fmtBytes(t.month.rx+t.month.tx);
+    }
     // live rates, session bytes and the interface belong to the card that is
     // actually online; for any other SIM only the stored history exists
     $("session").textContent=isCurrent()?fmtBytes(t.session_rx+t.session_tx):"—";

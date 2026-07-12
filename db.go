@@ -466,6 +466,16 @@ func (s *Store) GetDayUsage(simID int64, day string) (DayUsage, error) {
 	return d, err
 }
 
+// MonthUsage sums stored usage for one SIM over a month ("2006-01"),
+// excluding one day whose authoritative copy lives in the tracker's memory
+// (the write-through can lag it by up to persistEvery).
+func (s *Store) MonthUsage(simID int64, month, excludeDay string) (rx, tx uint64, err error) {
+	err = s.db.QueryRow(`SELECT COALESCE(SUM(rx),0), COALESCE(SUM(tx),0)
+	    FROM usage WHERE sim_id = ? AND day LIKE ? || '-%' AND day != ?`,
+		simID, month, excludeDay).Scan(&rx, &tx)
+	return rx, tx, err
+}
+
 func (s *Store) RecentDays(simID int64, n int) ([]DayUsage, error) {
 	rows, err := s.db.Query(
 		`SELECT day, rx, tx FROM usage WHERE sim_id = ? ORDER BY day DESC LIMIT ?`,

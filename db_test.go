@@ -370,3 +370,48 @@ func TestEnsureSIMKeepsUserLabel(t *testing.T) {
 	}
 	t.Fatalf("sim %d missing from ListSIMs", id)
 }
+
+// TestMonthUsage: the month total covers only the asked month and SIM, and
+// excludes the day the tracker holds in memory (whose store row may be stale).
+func TestMonthUsage(t *testing.T) {
+	s := openStore(t, t.TempDir())
+
+	simA, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000004"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	simB, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000005"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []struct {
+		sim    int64
+		day    string
+		rx, tx uint64
+	}{
+		{simA, "2026-06-30", 999, 999}, // previous month
+		{simA, "2026-07-01", 100, 10},
+		{simA, "2026-07-11", 200, 20},
+		{simA, "2026-07-12", 5, 5}, // stale write-through of "today"
+		{simB, "2026-07-05", 777, 777},
+	} {
+		if err := s.SetDayUsage(d.sim, DayUsage{Day: d.day, Rx: d.rx, Tx: d.tx}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rx, tx, err := s.MonthUsage(simA, "2026-07", "2026-07-12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rx != 300 || tx != 30 {
+		t.Errorf("month total rx=%d tx=%d, want 300/30 (other month, other SIM and excluded day must not count)", rx, tx)
+	}
+
+	// a month with no rows sums to zero, not an error
+	if rx, tx, err = s.MonthUsage(simA, "2026-01", "2026-01-15"); err != nil {
+		t.Fatal(err)
+	} else if rx != 0 || tx != 0 {
+		t.Errorf("empty month rx=%d tx=%d, want 0/0", rx, tx)
+	}
+}

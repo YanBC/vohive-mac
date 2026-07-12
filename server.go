@@ -146,6 +146,7 @@ func (s *Server) storedTraffic(simID int64) (TrafficSnapshot, error) {
 	return TrafficSnapshot{
 		SimID:   simID,
 		Today:   today,
+		Month:   monthUsage(s.store, simID, today),
 		Days:    days,
 		History: []RatePoint{},
 	}, nil
