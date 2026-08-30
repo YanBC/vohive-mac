@@ -14,6 +14,9 @@ BAIWANG/Quectel-style 4G USB dongle **entirely from userspace over raw USB**
    incoming messages. Disable deletion with `-archive-delete=false`.
 3. **Cellular data usage** — live throughput chart, session/today totals, daily
    history persisted across restarts
+4. **SIM PIN** — unlock a PIN-protected card (or unblock one with its PUK), and
+   turn the card's power-on PIN lock on or off / change its PIN. Remaining
+   attempts are shown before you spend one; codes are never logged
 
 Single Go binary; the UI is embedded. SMS goes over the dongle's AT port via USB
 bulk transfers; data usage is sampled from the macOS interface counters of the
@@ -55,6 +58,9 @@ This is also the tool used for the one-time ECM mode switch in the setup doc.
 |---|---|---|
 | `/api/status` | GET | Modem/SIM/network status (cached 5 s) |
 | `/api/traffic` | GET | Counters, rates, history, daily usage |
+| `/api/sim/lock` | GET / POST | PIN state + attempts left / `{"enabled": true, "pin": "1234"}` to switch the power-on lock |
+| `/api/sim/unlock` | POST | `{"code": "1234"}` — or `{"code": "<8-digit puk>", "new_pin": "1234"}` for a blocked card |
+| `/api/sim/pin` | POST | `{"pin": "1234", "new_pin": "5678"}` — change the card's PIN |
 | `/api/sms/inbox` | GET | Archived messages (in + out), newest first; triggers a modem sync if stale |
 | `/api/sms/send` | POST | `{"to": "+86138...", "text": "..."}` — also recorded in the archive |
 
@@ -63,6 +69,7 @@ This is also the tool used for the one-time ECM mode switch in the setup doc.
 ```
 main.go      entrypoint + `at` CLI subcommand
 modem.go     raw-USB AT channel, SMS send (UCS2), storage access, status queries
+pin.go       SIM PIN: unlock/PUK-unblock, power-on lock toggle, PIN change
 pdu.go       SMS-DELIVER PDU decoder
 ingest.go    SMS archiver: modem/SIM storage → SQLite (delete after archive)
 recovery.go  ECM link watchdog: USB-resets the dongle when the data link

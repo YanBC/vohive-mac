@@ -181,6 +181,15 @@ func (m *Modem) writeLocked(data []byte) error {
 }
 
 func (m *Modem) cmdLocked(command string, timeout time.Duration) (string, error) {
+	return m.cmdEchoLocked(command, command, timeout)
+}
+
+// cmdEchoLocked is cmdLocked with the command name that appears in errors
+// given separately: commands carrying a PIN or PUK pass a redacted echo, so a
+// code can never reach a log line or an API response. A redacted command also
+// quotes only the modem's error line back, never the whole response — with AT
+// echo on, that response would contain the code itself.
+func (m *Modem) cmdEchoLocked(command, echo string, timeout time.Duration) (string, error) {
 	if err := m.connectLocked(); err != nil {
 		return "", err
 	}
@@ -194,9 +203,24 @@ func (m *Modem) cmdLocked(command string, timeout time.Duration) (string, error)
 		return resp, err
 	}
 	if strings.Contains(resp, "ERROR") {
-		return resp, fmt.Errorf("%s failed: %s", command, strings.TrimSpace(resp))
+		detail := strings.TrimSpace(resp)
+		if echo != command {
+			detail = errorLine(resp)
+		}
+		return resp, fmt.Errorf("%s failed: %s", echo, detail)
 	}
 	return resp, nil
+}
+
+// errorLine picks the modem's "…ERROR…" line out of a response, dropping any
+// echoed command (which may carry a PIN) and the surrounding framing.
+func errorLine(resp string) string {
+	for _, line := range strings.Split(resp, "\n") {
+		if line = strings.TrimSpace(line); strings.Contains(line, "ERROR") {
+			return line
+		}
+	}
+	return "ERROR"
 }
 
 // Cmd sends one AT command and returns the full response text.
@@ -688,8 +712,8 @@ func (m *Modem) Status() Status {
 			}[strings.TrimSpace(last)]
 		}
 	}
-	if r, err := m.cmdLocked("AT+CPIN?", 4*time.Second); err == nil {
-		st.SIM = firstField(r, "+CPIN:")
+	if state, err := m.pinStateLocked(); err == nil {
+		st.SIM = state // READY, or the code the card is waiting for — see pin.go
 	} else {
 		st.SIM = "ERROR"
 	}

@@ -165,6 +165,65 @@ select:focus{border-color:var(--ph-dim)}
 .simbar .k{font-size:9px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase; white-space:nowrap}
 .simbar .hist{font-size:10px; color:var(--amber); letter-spacing:.12em}
 .msg .meta .box{width:auto; margin:0 0 0 auto; accent-color:#57e389; flex:none} /* input{width:100%} is for the send form */
+
+/* ---------- sim security (PIN) ---------- */
+#lockbtn.alert{
+  color:var(--red); border-color:var(--red); background:rgba(224,85,85,.10);
+  box-shadow:0 0 14px rgba(224,85,85,.30); text-shadow:0 0 8px rgba(224,85,85,.7);
+}
+#lockbtn.on{color:var(--ph); border-color:var(--ph-dim); background:rgba(87,227,137,.10);
+  box-shadow:0 0 12px rgba(87,227,137,.28)}
+#lockbtn.off{color:var(--faint)}
+.secbox{margin:0 0 18px; padding:16px 20px 18px}
+.secbox form{margin-bottom:0}
+.secbox.locked{border-color:#5c2626}
+.secbox.locked::before,.secbox.locked::after,
+.secbox.locked .tick::before,.secbox.locked .tick::after{border-color:var(--red)}
+.secrow{display:flex; flex-wrap:wrap; gap:12px 16px; align-items:flex-end}
+.secrow > div{flex:0 0 auto}
+.secrow button{margin-left:0; padding:11px 20px; align-self:flex-end}
+.secrow button.ghost{padding:9px 14px}
+/* A code is entered into a row of slots, not a text box: the real <input> lies
+   transparent on top (so typing, paste, maxlength and submit all behave), and
+   the cells below mirror it. A password box also drags Safari's key/autofill
+   button into the panel; a slot pad gives it nothing to hang off. */
+.pinfield{position:relative; display:inline-block; line-height:0}
+.pinfield .cells{display:flex; gap:7px}
+.pinfield .cells i{
+  width:32px; height:42px; border:1px solid var(--line); background:rgba(0,0,0,.4);
+  display:flex; align-items:center; justify-content:center; position:relative;
+  font-style:normal; font-size:24px; line-height:1; color:var(--ph);
+  text-shadow:0 0 10px rgba(87,227,137,.5); transition:border-color .15s, box-shadow .15s;
+}
+.pinfield .cells i.on{border-color:var(--ph-dim)}
+/* slots beyond the required minimum: allowed, not demanded */
+.pinfield .cells i.opt{border-style:dashed; opacity:.4}
+.pinfield.focus .cells i.cur{border-style:solid; opacity:1}
+.pinfield.focus .cells i.cur{
+  border-color:var(--ph);
+  box-shadow:0 0 12px rgba(87,227,137,.22), inset 0 0 10px rgba(87,227,137,.07);
+}
+.pinfield.focus .cells i.cur::after{
+  content:""; width:1px; height:20px; background:var(--ph);
+  box-shadow:0 0 6px var(--ph); animation:caret 1.05s steps(1) infinite;
+}
+@keyframes caret{50%{opacity:0}}
+.pinfield input{
+  position:absolute; inset:0; z-index:1; width:100%; height:100%; padding:0;
+  background:transparent; border:0; color:transparent; caret-color:transparent;
+}
+.pinfield input:focus{border:0; box-shadow:none}
+.pinfield input::-webkit-credentials-auto-fill-button,
+.pinfield input::-webkit-strong-password-auto-fill-button{
+  visibility:hidden; pointer-events:none; position:absolute; right:0;
+  width:0; height:0; margin:0;
+}
+.secsub{margin-top:16px; padding-top:15px; border-top:1px solid var(--line)}
+.secsub h3{font-family:var(--disp); font-weight:400; font-size:10px; letter-spacing:.24em;
+  color:var(--dim); text-transform:uppercase; margin-bottom:11px}
+.hint{display:block; font-size:11px; color:var(--dim); margin-top:9px; line-height:1.6}
+.hint b{color:var(--amber); font-weight:400}
+#st-sim.warn{color:var(--red)}
 .movebar{
   display:flex; align-items:center; gap:8px; font-size:11px; color:var(--amber);
   border:1px solid var(--amber); background:rgba(240,177,62,.07); padding:8px 10px; margin-bottom:8px;
@@ -203,8 +262,61 @@ footer{margin-top:22px; font-size:10px; color:var(--faint); letter-spacing:.15em
   <span class="k">card</span>
   <select id="simsel" title="messages and data usage are recorded per SIM"></select>
   <button class="ghost" type="button" id="renamesim">rename</button>
+  <button class="ghost" type="button" id="lockbtn" hidden
+          title="SIM PIN: the code the card itself demands at power-on">pin lock: —</button>
   <span class="hist" id="simhist" hidden>◂ history only — not the card in the dongle</span>
 </div>
+
+<section class="panel secbox" id="secbox" hidden><span class="tick"></span>
+  <h2 id="sectitle">SIM Security</h2>
+  <div class="note" id="secnote"></div>
+
+  <!-- shown only while the card is actually waiting for a code -->
+  <form id="unlockform" hidden>
+    <div class="secrow">
+      <div><label for="uncode" id="uncodelab">pin</label>
+        <input id="uncode" type="password" inputmode="numeric" autocomplete="off"
+               maxlength="8"></div>
+      <div id="unnewwrap" hidden><label for="unnew">new pin</label>
+        <input id="unnew" type="password" inputmode="numeric" autocomplete="off"
+               maxlength="8"></div>
+      <button type="submit" id="unlockgo">Unlock</button>
+    </div>
+    <span class="hint" id="unhint"></span>
+  </form>
+
+  <!-- shown once the card is usable -->
+  <div id="manage" hidden>
+    <div class="secsub" style="margin-top:0; padding-top:0; border-top:0">
+      <h3>Power-on PIN lock</h3>
+      <form id="lockform">
+        <div class="secrow">
+          <div><label for="lkpin">current pin</label>
+            <input id="lkpin" type="password" inputmode="numeric" autocomplete="off"
+                   maxlength="8"></div>
+          <button type="submit" id="lockgo">Enable lock</button>
+        </div>
+        <span class="hint" id="lkhint"></span>
+      </form>
+    </div>
+    <div class="secsub">
+      <h3>Change PIN</h3>
+      <form id="chpinform">
+        <div class="secrow">
+          <div><label for="chold">current pin</label>
+            <input id="chold" type="password" inputmode="numeric" autocomplete="off"
+                   maxlength="8"></div>
+          <div><label for="chnew">new pin</label>
+            <input id="chnew" type="password" inputmode="numeric" autocomplete="off"
+                   maxlength="8"></div>
+          <button type="submit" id="chgo">Change</button>
+        </div>
+        <span class="hint">4 to 8 digits. The card must have its lock enabled before the
+          PIN can be changed — the new code takes effect at the next power-on.</span>
+      </form>
+    </div>
+  </div>
+</section>
 
 <main>
   <section class="panel"><span class="tick"></span>
@@ -332,6 +444,9 @@ async function pollStatus(){
     [...$("sig").children].forEach((b,i)=>b.className=i<bars?"on":"");
     if(s.own_number && !$("to").value) $("to").placeholder=s.own_number+"  (this SIM)";
     if(!dataBusy && typeof s.data_enabled==="boolean"){dataEnabled=s.data_enabled; renderData();}
+    // +CPIN state doubles as the lock indicator; re-read the details on a change
+    $("st-sim").classList.toggle("warn", !!s.sim && s.sim!=="READY");
+    if(s.sim && s.sim!==lastPinState){ lastPinState=s.sim; loadLock(); }
   }catch(e){ $("led").className="led err"; }
 }
 
@@ -368,6 +483,185 @@ $("databtn").addEventListener("click",async()=>{
   }
   // the toggle reboots the dongle; let it re-enumerate before trusting status
   setTimeout(()=>{dataBusy=false; renderData(); pollStatus();},25000);
+});
+
+/* pinField turns a code <input> into a row of slots. The input keeps doing the
+   real work (focus, typing, paste, maxlength, submit) with its text and caret
+   made transparent; the cells beneath mirror its length. All slots up to the
+   maximum are always drawn, with the ones past the required minimum dashed —
+   so a 4-digit and an 8-digit PIN both see their length as legitimate. */
+function pinField(input, min){
+  const wrap=document.createElement("div");
+  wrap.className="pinfield";
+  input.replaceWith(wrap);
+  const cells=document.createElement("div");
+  cells.className="cells"; cells.setAttribute("aria-hidden","true");
+  wrap.append(cells, input);
+  let lo=min;
+  const draw=()=>{
+    const len=input.value.length, n=+input.maxLength;
+    if(cells.children.length!==n){
+      cells.innerHTML="";
+      for(let i=0;i<n;i++) cells.appendChild(document.createElement("i"));
+    }
+    [...cells.children].forEach((c,i)=>{
+      // past the minimum is "opt": dashed until a digit actually lands there
+      c.className=(i<len?"on":i===len?"cur":"")+(i>=lo&&i>=len?" opt":"");
+      c.textContent=i<len?"•":"";
+    });
+  };
+  // the card accepts nothing but digits, so nothing else gets in
+  input.addEventListener("input",()=>{
+    const clean=input.value.replace(/\D/g,"");
+    if(clean!==input.value) input.value=clean;
+    draw();
+  });
+  input.addEventListener("focus",()=>{wrap.classList.add("focus"); draw();});
+  input.addEventListener("blur",()=>wrap.classList.remove("focus"));
+  draw();
+  return {
+    setMin(n){ if(n!==lo){ lo=n; draw(); } },
+    clear(){ input.value=""; draw(); },
+    focus(){ input.focus(); },
+  };
+}
+const padCode=pinField($("uncode"),4), padCodeNew=pinField($("unnew"),4),
+      padLock=pinField($("lkpin"),4),
+      padOld=pinField($("chold"),4), padNew=pinField($("chnew"),4);
+
+/* ---------------- sim pin ----------------
+   The PIN belongs to the card, not to this app: it is checked by the SIM
+   itself, which allows three wrong guesses before demanding the carrier's
+   8-digit PUK. So every code goes to the modem exactly once, on an explicit
+   submit — nothing here retries, and the attempts left are always shown. */
+let lock=null, lockOpen=false, lockBusy=false, lastPinState=null;
+
+async function loadLock(){
+  try{
+    const r=await fetch("/api/sim/lock");
+    const j=await r.json();
+    lock=r.ok?j:null;
+  }catch(e){ lock=null; }
+  renderLock();
+}
+
+const attemptsLeft=()=>{
+  if(!lock||lock.pin_retries<0) return "";
+  if(lock.pin_retries>0) return lock.pin_retries+" PIN attempt"+(lock.pin_retries===1?"":"s")+" left";
+  return "PIN blocked · "+(lock.puk_retries>0?lock.puk_retries+" PUK attempts left":"no attempts left");
+};
+function secNote(text,kind){
+  const n=$("secnote");
+  n.textContent=text||"";
+  n.className="note"+(text?" "+kind:"");
+}
+
+function renderLock(){
+  const btn=$("lockbtn"), box=$("secbox");
+  if(!lock){ btn.hidden=true; box.hidden=true; return; }
+  const needs=!lock.ready, en=lock.enabled;
+  btn.hidden=false;
+  btn.textContent=needs?"◆ "+(lock.need||"code")+" required"
+    :"pin lock: "+(en===true?"on":en===false?"off":"?");
+  btn.classList.toggle("alert",needs);
+  btn.classList.toggle("on",!needs&&en===true);
+  btn.classList.toggle("off",!needs&&en===false);
+
+  // a card that is waiting for a code is not something to hide behind a click
+  box.hidden=!(needs||lockOpen);
+  box.classList.toggle("locked",needs);
+  $("sectitle").textContent=needs?"SIM Locked":"SIM Security";
+  $("unlockform").hidden=!needs;
+  $("manage").hidden=needs;
+
+  if(needs){
+    const puk=lock.need==="puk"||lock.need==="puk2";
+    $("uncodelab").textContent=lock.need; // "pin" / "puk"; the hint carries the detail
+    padCode.setMin(puk?8:4); // a PUK is exactly 8; a PIN is 4 to 8
+    $("unnewwrap").hidden=!puk;
+    $("unlockgo").textContent=puk?"Unblock":"Unlock";
+    const att=attemptsLeft();
+    $("unhint").innerHTML=(lock.need==="other"
+      ?"The modem reports <b>"+esc(lock.state)+"</b> — that is a phone or network lock, which no SIM code clears."
+      :puk?"Three wrong PINs blocked this card. The 8-digit PUK is on the SIM holder or available from the carrier; it replaces the PIN rather than restoring it. <b>Ten wrong PUKs destroy the card permanently.</b>"
+      :"The code is checked by the card itself.")+(att?" <b>"+esc(att)+"</b>":"");
+    $("unlockgo").disabled=lockBusy||lock.need==="other";
+  }else{
+    $("lockgo").textContent=en?"Disable lock":"Enable lock";
+    $("lkhint").innerHTML=(en
+      ?"The card asks for its PIN every time it powers on. Disabling stops that; the PIN itself is kept and can be re-enabled later."
+      :"Enabling makes the card demand its <em>existing</em> PIN at every power-on — a new SIM's is the carrier default printed on the holder, not one you pick here. Get it wrong three times and the card needs its PUK.")
+      +(attemptsLeft()?" <b>"+esc(attemptsLeft())+"</b>":"");
+    $("lockgo").disabled=lockBusy;
+    $("chgo").disabled=lockBusy;
+  }
+}
+
+$("lockbtn").addEventListener("click",()=>{
+  if(lock&&!lock.ready){ padCode.focus(); return; } // already open, and stays open
+  lockOpen=!lockOpen;
+  secNote("");
+  renderLock();
+  if(lockOpen) padLock.focus();
+});
+
+// posts one code attempt and folds the answer back into `lock`
+async function submitCode(url,body,okMsg){
+  lockBusy=true; renderLock();
+  try{
+    const r=await fetch(url,{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!r.ok){
+      if(j.lock) lock=j.lock;          // carries the attempts the card has left
+      throw new Error(j.error||r.statusText);
+    }
+    lock=j;
+    secNote(okMsg,"ok");
+    return true;
+  }catch(e){
+    secNote("✗ "+e.message,"err");
+    return false;
+  }finally{
+    lockBusy=false; renderLock();
+  }
+}
+
+$("unlockform").addEventListener("submit",async ev=>{
+  ev.preventDefault();
+  if(lockBusy) return;
+  const ok=await submitCode("/api/sim/unlock",
+    {code:$("uncode").value.trim(),new_pin:$("unnew").value.trim()},
+    "✓ SIM unlocked");
+  if(!ok) return;
+  padCode.clear(); padCodeNew.clear();
+  // the card only becomes readable now: its number, operator and history follow
+  lockOpen=false; renderLock();
+  pollStatus(); await loadSims(); loadInbox(); pollTraffic();
+});
+
+$("lockform").addEventListener("submit",async ev=>{
+  ev.preventDefault();
+  if(lockBusy||!lock) return;
+  const target=!lock.enabled;
+  if(target&&!confirm("Make this SIM ask for its PIN at every power-on?\n\n"+
+      "The code is the one the card already has (the carrier's default unless it was changed). "+
+      "Three wrong entries block the card until its PUK is entered."))
+    return;
+  const ok=await submitCode("/api/sim/lock",
+    {enabled:target,pin:$("lkpin").value.trim()},
+    target?"✓ PIN lock enabled — it takes effect at the next power-on"
+          :"✓ PIN lock disabled");
+  if(ok){ padLock.clear(); pollStatus(); }
+});
+
+$("chpinform").addEventListener("submit",async ev=>{
+  ev.preventDefault();
+  if(lockBusy) return;
+  const ok=await submitCode("/api/sim/pin",
+    {pin:$("chold").value.trim(),new_pin:$("chnew").value.trim()},
+    "✓ PIN changed");
+  if(ok){ padOld.clear(); padNew.clear(); }
 });
 
 /* ---------------- traffic ---------------- */
@@ -517,10 +811,12 @@ $("movego").addEventListener("click",async()=>{
 /* ---------------- boot ---------------- */
 loadSims().then(()=>{ pollTraffic(); loadInbox(); });
 pollStatus();
+loadLock();
 setInterval(pollTraffic,3000);
 setInterval(pollStatus,12000);
 setInterval(loadInbox,60000);
 setInterval(loadSims,30000);
+setInterval(loadLock,60000); // pollStatus() re-reads it sooner on any +CPIN change
 </script>
 </body>
 </html>

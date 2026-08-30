@@ -25,6 +25,7 @@ package main
 
 import (
 	"log"
+	"strings"
 	"time"
 )
 
@@ -56,6 +57,7 @@ func (w *Watchdog) run() {
 	var lastReset time.Time
 	var settleUntil time.Time
 	var verifyAt time.Time
+	pinNoted := false // "SIM is locked" is logged on entry to that state, not every tick
 	lastTick := time.Now()
 	for {
 		select {
@@ -122,6 +124,20 @@ func (w *Watchdog) run() {
 			downSince = time.Time{}
 			continue
 		}
+		// A card waiting for its PIN carries no data, and re-enumerating the
+		// dongle only puts the same locked card back. Asked here rather than
+		// read from a cache: with no browser polling, nothing else would have
+		// looked at +CPIN? recently enough to be trusted.
+		if ready, need, err := w.modem.PINReady(); err == nil && !ready {
+			if !pinNoted {
+				log.Printf("watchdog: %s link down but the SIM is waiting for its %s — leaving it alone",
+					iface, strings.ToUpper(need))
+				pinNoted = true
+			}
+			downSince = time.Time{}
+			continue
+		}
+		pinNoted = false
 		log.Printf("watchdog: %s link down for %s but modem alive — resetting USB device",
 			iface, time.Since(downSince).Round(time.Second))
 		if err := w.modem.ResetUSB(); err != nil {
