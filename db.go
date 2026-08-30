@@ -24,8 +24,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// schemaVersion is stored in PRAGMA user_version. 1 introduced per-SIM rows.
-const schemaVersion = 1
+// schemaVersion is stored in PRAGMA user_version. 1 introduced per-SIM rows;
+// 2 spelled generated SIM labels out to the full ICCID.
+const schemaVersion = 2
 
 // unknownSIM is the sim_id of the reserved catch-all row.
 const unknownSIM int64 = 0
@@ -166,6 +167,21 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+	// v2: a generated label carries the whole ICCID (SIMIdentity.defaultLabel)
+	// rather than the last six digits, so an unnamed card can be identified
+	// from the number printed on it. Rewrite the placeholders older builds
+	// stored — only rows whose label still matches a form this app generated;
+	// a name the user typed matches neither and is left alone.
+	if _, err := db.Exec(`UPDATE sims SET label = CASE
+	        WHEN label = '…' || substr(iccid, -6) THEN iccid
+	        ELSE operator || ' ' || iccid END
+	    WHERE id != ? AND length(iccid) > 6 AND (
+	        label = '…' || substr(iccid, -6) OR
+	        (operator != '' AND label = operator || ' …' || substr(iccid, -6)))`,
+		unknownSIM); err != nil {
+		return err
+	}
+
 	_, err = db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
 	return err
 }

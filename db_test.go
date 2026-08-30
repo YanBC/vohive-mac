@@ -384,8 +384,8 @@ func TestEnsureSIMUpgradesGeneratedLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := labelOf(t, s, id); got != locked.defaultLabel() {
-		t.Fatalf("label while locked = %q, want the ICCID tail %q", got, locked.defaultLabel())
+	if got := labelOf(t, s, id); got != locked.ICCID {
+		t.Fatalf("label while locked = %q, want the ICCID %q", got, locked.ICCID)
 	}
 
 	// unlocked: the same card, now fully readable
@@ -412,10 +412,12 @@ func TestEnsureSIMUpgradesStaleGeneratedLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// reproduce the divergence: identity moves on, label left behind
+	// reproduce the divergence: identity moves on, label left behind — in the
+	// truncated form generated labels used to take, which is what a database
+	// written by an older build actually holds
 	if _, err := s.db.Exec(
-		`UPDATE sims SET number = ?, operator = ? WHERE id = ?`,
-		"+8613700137005", "Mi Mobile", id); err != nil {
+		`UPDATE sims SET number = ?, operator = ?, label = ? WHERE id = ?`,
+		"+8613700137005", "Mi Mobile", "…000005", id); err != nil {
 		t.Fatal(err)
 	}
 	if got := labelOf(t, s, id); got != "…000005" {
@@ -483,6 +485,62 @@ func TestEnsureSIMKeepsUserLabelWhenLocked(t *testing.T) {
 	}
 	if got := labelOf(t, s, id); got != "travel sim" {
 		t.Errorf("label = %q, want %q", got, "travel sim")
+	}
+}
+
+// TestMigrateExpandsTruncatedLabels: v1 stored generated labels as the last
+// six ICCID digits, which is not enough to identify a card against the number
+// printed on it. The migration spells them out — without touching a name the
+// user typed, which is the whole reason it matches on the generated forms
+// rather than rewriting every label it finds.
+func TestMigrateExpandsTruncatedLabels(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir)
+
+	bare := SIMIdentity{ICCID: "8986000000000000006"}
+	withOp := SIMIdentity{ICCID: "8986000000000000007", Operator: "Mi Mobile"}
+	named := SIMIdentity{ICCID: "8986000000000000008"}
+	ids := map[string]int64{}
+	for _, id := range []SIMIdentity{bare, withOp, named} {
+		rowID, err := s.EnsureSIM(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[id.ICCID] = rowID
+	}
+	// wind the database back to what v1 wrote
+	for _, l := range []struct {
+		id    int64
+		label string
+	}{
+		{ids[bare.ICCID], "…000006"},
+		{ids[withOp.ICCID], "Mi Mobile …000007"},
+		{ids[named.ICCID], "travel sim"},
+	} {
+		if _, err := s.db.Exec(`UPDATE sims SET label = ? WHERE id = ?`,
+			l.label, l.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s = openStore(t, dir)
+	for _, want := range []struct {
+		id    int64
+		label string
+	}{
+		{ids[bare.ICCID], bare.ICCID},
+		{ids[withOp.ICCID], "Mi Mobile " + withOp.ICCID},
+		{ids[named.ICCID], "travel sim"},
+	} {
+		if got := labelOf(t, s, want.id); got != want.label {
+			t.Errorf("sim %d label = %q, want %q", want.id, got, want.label)
+		}
 	}
 }
 

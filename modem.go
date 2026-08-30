@@ -507,8 +507,12 @@ type SIMIdentity struct {
 	Operator string `json:"operator,omitempty"`
 }
 
-// iccidTail is the last of the ICCID, which is printed on the card — enough
-// to tell two SIMs apart by eye when nothing better is readable.
+// iccidTail is the abbreviated ICCID older builds used in generated labels.
+// Nothing produces it any more — the whole point of showing a card its ICCID
+// is telling two unnamed cards apart, and the last six digits of two ICCIDs
+// from the same batch can be all that differs — but it is still the form
+// stored in every row written before that change, so isGeneratedLabel has to
+// keep recognising it. Databases are rewritten to the full ICCID by migrate().
 func (s SIMIdentity) iccidTail() string {
 	if len(s.ICCID) > 6 {
 		return "…" + s.ICCID[len(s.ICCID)-6:]
@@ -522,9 +526,9 @@ func (s SIMIdentity) defaultLabel() string {
 		return s.Number
 	}
 	if s.Operator != "" {
-		return s.Operator + " " + s.iccidTail()
+		return s.Operator + " " + s.ICCID
 	}
-	return s.iccidTail()
+	return s.ICCID
 }
 
 // isGeneratedLabel reports whether label is one this app could have produced
@@ -533,18 +537,21 @@ func (s SIMIdentity) defaultLabel() string {
 // It has to check every form defaultLabel can emit, not just today's, because
 // a label and the identity beside it are not written in lockstep: the identity
 // is refreshed on every sighting, while the label is written once. A card
-// first seen at its PIN prompt is labelled with its ICCID tail and then learns
-// its number, so the two are legitimately out of step — comparing the label
+// first seen at its PIN prompt is labelled with its ICCID and then learns its
+// number, so the two are legitimately out of step — comparing the label
 // against the *current* default would read that placeholder as a user's choice
 // and pin it forever.
 func (s SIMIdentity) isGeneratedLabel(label string) bool {
-	if label == "" || label == s.iccidTail() {
+	if label == "" || label == s.ICCID || label == s.iccidTail() {
 		return true
 	}
 	if s.Number != "" && label == s.Number {
 		return true
 	}
-	return s.Operator != "" && label == s.Operator+" "+s.iccidTail()
+	if s.Operator == "" {
+		return false
+	}
+	return label == s.Operator+" "+s.ICCID || label == s.Operator+" "+s.iccidTail()
 }
 
 // digitsOf keeps the characters an ICCID/IMSI may contain (ICCIDs are
