@@ -371,6 +371,136 @@ func TestEnsureSIMKeepsUserLabel(t *testing.T) {
 	t.Fatalf("sim %d missing from ListSIMs", id)
 }
 
+// TestEnsureSIMUpgradesGeneratedLabel: a card first seen at its PIN prompt has
+// only a readable ICCID, so the label generated for it is the ICCID tail. Once
+// the PIN is entered and the real identity arrives, that placeholder must give
+// way — it was never a name the user chose.
+func TestEnsureSIMUpgradesGeneratedLabel(t *testing.T) {
+	s := openStore(t, t.TempDir())
+
+	// PIN-locked: AT+CIMI/+CNUM/+COPS all refuse, only the ICCID answers
+	locked := SIMIdentity{ICCID: "8986000000000000004"}
+	id, err := s.EnsureSIM(locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := labelOf(t, s, id); got != locked.defaultLabel() {
+		t.Fatalf("label while locked = %q, want the ICCID tail %q", got, locked.defaultLabel())
+	}
+
+	// unlocked: the same card, now fully readable
+	open := SIMIdentity{ICCID: "8986000000000000004", IMSI: "460099948800096",
+		Number: "+8613700137004", Operator: "Mi Mobile"}
+	if _, err := s.EnsureSIM(open); err != nil {
+		t.Fatal(err)
+	}
+	if got := labelOf(t, s, id); got != "+8613700137004" {
+		t.Errorf("label after unlock = %q, want it to follow the number", got)
+	}
+}
+
+// TestEnsureSIMUpgradesStaleGeneratedLabel: the label and the identity beside
+// it are not written in lockstep — older builds refreshed number/operator on
+// every sighting while freezing the label — so a row can hold a generated
+// label that no longer matches any default its own identity would produce
+// today. That label is still not the user's, and must still give way.
+func TestEnsureSIMUpgradesStaleGeneratedLabel(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir)
+
+	id, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000005"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// reproduce the divergence: identity moves on, label left behind
+	if _, err := s.db.Exec(
+		`UPDATE sims SET number = ?, operator = ? WHERE id = ?`,
+		"+8613700137005", "Mi Mobile", id); err != nil {
+		t.Fatal(err)
+	}
+	if got := labelOf(t, s, id); got != "…000005" {
+		t.Fatalf("setup: label = %q, want the stale ICCID tail", got)
+	}
+
+	if _, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000005",
+		Number: "+8613700137005", Operator: "Mi Mobile"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := labelOf(t, s, id); got != "+8613700137005" {
+		t.Errorf("label = %q, want the stale placeholder replaced by the number", got)
+	}
+}
+
+// TestEnsureSIMKeepsIdentityWhenLocked: a PIN-locked card answers only its
+// ICCID — AT+CIMI/+CNUM/+COPS all refuse — so a sighting taken at the PIN
+// prompt carries blanks. Unplugging and replugging the dongle produces exactly
+// that sighting, and it must not erase what the card gave up while it was
+// open, nor drop its label back to the ICCID tail.
+func TestEnsureSIMKeepsIdentityWhenLocked(t *testing.T) {
+	s := openStore(t, t.TempDir())
+
+	open := SIMIdentity{ICCID: "8986000000000000006", IMSI: "460099948800096",
+		Number: "+8613700137006", Operator: "Mi Mobile"}
+	id, err := s.EnsureSIM(open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// replugged: the card is back at its PIN prompt
+	if _, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000006"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var got SIMIdentity
+	var label string
+	if err := s.db.QueryRow(
+		`SELECT imsi, number, operator, label FROM sims WHERE id = ?`, id).
+		Scan(&got.IMSI, &got.Number, &got.Operator, &label); err != nil {
+		t.Fatal(err)
+	}
+	if got.IMSI != open.IMSI || got.Number != open.Number || got.Operator != open.Operator {
+		t.Errorf("identity after a locked sighting = %+v, want it preserved as %+v", got, open)
+	}
+	if label != open.Number {
+		t.Errorf("label = %q, want it to stay %q", label, open.Number)
+	}
+}
+
+// TestEnsureSIMKeepsUserLabelWhenLocked: the same replug must not disturb a
+// name the user chose either.
+func TestEnsureSIMKeepsUserLabelWhenLocked(t *testing.T) {
+	s := openStore(t, t.TempDir())
+
+	id, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000007",
+		Number: "+8613700137007", Operator: "Mi Mobile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSIMLabel(id, "travel sim"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000007"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := labelOf(t, s, id); got != "travel sim" {
+		t.Errorf("label = %q, want %q", got, "travel sim")
+	}
+}
+
+func labelOf(t *testing.T, s *Store, simID int64) string {
+	t.Helper()
+	sims, err := s.ListSIMs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sim := range sims {
+		if sim.ID == simID {
+			return sim.Label
+		}
+	}
+	t.Fatalf("sim %d missing from ListSIMs", simID)
+	return ""
+}
+
 // TestMonthUsage: the month total covers only the asked month and SIM, and
 // excludes the day the tracker holds in memory (whose store row may be stale).
 func TestMonthUsage(t *testing.T) {

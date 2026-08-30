@@ -507,19 +507,44 @@ type SIMIdentity struct {
 	Operator string `json:"operator,omitempty"`
 }
 
+// iccidTail is the last of the ICCID, which is printed on the card — enough
+// to tell two SIMs apart by eye when nothing better is readable.
+func (s SIMIdentity) iccidTail() string {
+	if len(s.ICCID) > 6 {
+		return "…" + s.ICCID[len(s.ICCID)-6:]
+	}
+	return s.ICCID
+}
+
 // defaultLabel is what the UI shows for a SIM until the user renames it.
 func (s SIMIdentity) defaultLabel() string {
 	if s.Number != "" {
 		return s.Number
 	}
-	tail := s.ICCID
-	if len(tail) > 6 {
-		tail = "…" + tail[len(tail)-6:]
-	}
 	if s.Operator != "" {
-		return s.Operator + " " + tail
+		return s.Operator + " " + s.iccidTail()
 	}
-	return tail
+	return s.iccidTail()
+}
+
+// isGeneratedLabel reports whether label is one this app could have produced
+// for this card, rather than a name the user typed.
+//
+// It has to check every form defaultLabel can emit, not just today's, because
+// a label and the identity beside it are not written in lockstep: the identity
+// is refreshed on every sighting, while the label is written once. A card
+// first seen at its PIN prompt is labelled with its ICCID tail and then learns
+// its number, so the two are legitimately out of step — comparing the label
+// against the *current* default would read that placeholder as a user's choice
+// and pin it forever.
+func (s SIMIdentity) isGeneratedLabel(label string) bool {
+	if label == "" || label == s.iccidTail() {
+		return true
+	}
+	if s.Number != "" && label == s.Number {
+		return true
+	}
+	return s.Operator != "" && label == s.Operator+" "+s.iccidTail()
 }
 
 // digitsOf keeps the characters an ICCID/IMSI may contain (ICCIDs are

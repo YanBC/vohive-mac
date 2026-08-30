@@ -238,28 +238,78 @@ type SIM struct {
 }
 
 // EnsureSIM upserts the SIM currently in the dongle and returns its row id.
-// Identity is the ICCID; number/operator/IMSI are refreshed on every sighting
-// (a number can be provisioned onto a SIM later), but a non-empty label is
-// never overwritten — that one belongs to the user.
+// Identity is the ICCID; number/operator/IMSI accumulate across sightings (a
+// number can be provisioned onto a SIM later, and a locked card reports none
+// of them — see mergeSIM), as does a label the user never chose. A label the
+// user *did* choose is never touched.
 func (s *Store) EnsureSIM(id SIMIdentity) (int64, error) {
 	if id.ICCID == "" {
 		return unknownSIM, fmt.Errorf("SIM has no ICCID")
 	}
-	_, err := s.db.Exec(`INSERT INTO sims (iccid, imsi, number, operator, label)
+	merged, label, err := s.mergeSIM(id)
+	if err != nil {
+		return unknownSIM, err
+	}
+	_, err = s.db.Exec(`INSERT INTO sims (iccid, imsi, number, operator, label)
 	    VALUES (?,?,?,?,?)
 	    ON CONFLICT(iccid) DO UPDATE SET
 	        imsi      = excluded.imsi,
 	        number    = excluded.number,
 	        operator  = excluded.operator,
-	        label     = CASE WHEN sims.label = '' THEN excluded.label ELSE sims.label END,
+	        label     = excluded.label,
 	        last_seen = datetime('now','localtime')`,
-		id.ICCID, id.IMSI, id.Number, id.Operator, id.defaultLabel())
+		merged.ICCID, merged.IMSI, merged.Number, merged.Operator, label)
 	if err != nil {
 		return unknownSIM, err
 	}
 	var rowID int64
 	err = s.db.QueryRow(`SELECT id FROM sims WHERE iccid = ?`, id.ICCID).Scan(&rowID)
 	return rowID, err
+}
+
+// mergeSIM folds a sighting into what is already stored for that card, and
+// decides the label to write with it.
+//
+// A field the modem could not read is not a field that became empty. While a
+// SIM sits at its PIN prompt only the ICCID answers — AT+CIMI, AT+CNUM and
+// AT+COPS all refuse — so a locked sighting carries no IMSI, number or
+// operator. Writing those blanks through would make every replug erase what
+// the card gave up the last time it was open, so a blank never overwrites a
+// known value; identity only accumulates.
+//
+// The label follows the same principle. A name the user typed is theirs and
+// survives; a name this app generated is only ever a rendering of the identity
+// readable at the time, so it tracks the merged identity. Which of the two a
+// stored label is gets decided by its *form* (SIMIdentity.isGeneratedLabel),
+// never by comparing it to a single current default — the row it describes has
+// usually already moved past that.
+func (s *Store) mergeSIM(id SIMIdentity) (SIMIdentity, string, error) {
+	stored := SIMIdentity{ICCID: id.ICCID}
+	var label string
+	err := s.db.QueryRow(
+		`SELECT imsi, number, operator, label FROM sims WHERE iccid = ?`, id.ICCID).
+		Scan(&stored.IMSI, &stored.Number, &stored.Operator, &label)
+	switch {
+	case err == sql.ErrNoRows: // first sighting: nothing to merge or preserve
+		return id, id.defaultLabel(), nil
+	case err != nil:
+		return SIMIdentity{}, "", err
+	}
+
+	merged := id
+	if merged.IMSI == "" {
+		merged.IMSI = stored.IMSI
+	}
+	if merged.Number == "" {
+		merged.Number = stored.Number
+	}
+	if merged.Operator == "" {
+		merged.Operator = stored.Operator
+	}
+	if !stored.isGeneratedLabel(label) {
+		return merged, label, nil // the user named this card
+	}
+	return merged, merged.defaultLabel(), nil
 }
 
 func (s *Store) ListSIMs() ([]SIM, error) {
