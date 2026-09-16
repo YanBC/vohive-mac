@@ -25,11 +25,18 @@ import (
 )
 
 // schemaVersion is stored in PRAGMA user_version. 1 introduced per-SIM rows;
-// 2 spelled generated SIM labels out to the full ICCID.
-const schemaVersion = 2
+// 2 spelled generated SIM labels out to the full ICCID; 3 added the per-SIM
+// metered flag; 4 turned it on by default.
+const schemaVersion = 4
 
 // unknownSIM is the sim_id of the reserved catch-all row.
 const unknownSIM int64 = 0
+
+// meteredByDefault is the `sims.metered` column default, in Go. A SIM is
+// assumed to be on a paid plan until someone says otherwise: guessing wrong
+// this way costs a little sync latency, guessing wrong the other way spends
+// the user's data.
+const meteredByDefault = true
 
 const schema = `
 CREATE TABLE IF NOT EXISTS sims (
@@ -39,6 +46,7 @@ CREATE TABLE IF NOT EXISTS sims (
     number     TEXT NOT NULL DEFAULT '',  -- MSISDN (AT+CNUM); often blank
     operator   TEXT NOT NULL DEFAULT '',
     label      TEXT NOT NULL DEFAULT '',  -- user-facing name, defaults to number
+    metered    INTEGER NOT NULL DEFAULT 1, -- mark the ECM link low-data (see metered.go)
     first_seen TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     last_seen  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -182,6 +190,33 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
+	// v3: the per-SIM metered flag. CREATE TABLE IF NOT EXISTS above leaves an
+	// existing `sims` alone, so the column is added here, with the same default
+	// a fresh database gets.
+	hasMetered, err := columnExists(db, "sims", "metered")
+	if err != nil {
+		return err
+	}
+	if !hasMetered {
+		if _, err := db.Exec(
+			`ALTER TABLE sims ADD COLUMN metered INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return err
+		}
+	}
+
+	// v4: metered is the default — a card is assumed to be on a paid plan
+	// until it is called free. A database that already has the column was
+	// written by a build whose default was off, and those zeroes came from
+	// that default rather than from anyone choosing them, so they are brought
+	// up; for a database arriving from v2 or earlier the ALTER above has
+	// already done it. This runs once (it is inside the user_version guard),
+	// so a card switched off afterwards stays off.
+	if hasMetered {
+		if _, err := db.Exec(`UPDATE sims SET metered = 1`); err != nil {
+			return err
+		}
+	}
+
 	_, err = db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
 	return err
 }
@@ -247,6 +282,7 @@ type SIM struct {
 	Number    string `json:"number,omitempty"`
 	Operator  string `json:"operator,omitempty"`
 	Label     string `json:"label"`
+	Metered   bool   `json:"metered"`
 	FirstSeen string `json:"first_seen"`
 	LastSeen  string `json:"last_seen"`
 	Messages  int    `json:"messages"` // how much history hangs off this SIM,
@@ -330,7 +366,7 @@ func (s *Store) mergeSIM(id SIMIdentity) (SIMIdentity, string, error) {
 
 func (s *Store) ListSIMs() ([]SIM, error) {
 	rows, err := s.db.Query(`SELECT s.id, s.iccid, s.imsi, s.number, s.operator,
-	    s.label, s.first_seen, s.last_seen,
+	    s.label, s.metered, s.first_seen, s.last_seen,
 	    (SELECT COUNT(*) FROM messages m WHERE m.sim_id = s.id),
 	    (SELECT COALESCE(SUM(u.rx + u.tx), 0) FROM usage u WHERE u.sim_id = s.id)
 	    FROM sims s ORDER BY s.last_seen DESC`)
@@ -342,7 +378,8 @@ func (s *Store) ListSIMs() ([]SIM, error) {
 	for rows.Next() {
 		var m SIM
 		if err := rows.Scan(&m.ID, &m.ICCID, &m.IMSI, &m.Number, &m.Operator,
-			&m.Label, &m.FirstSeen, &m.LastSeen, &m.Messages, &m.Bytes); err != nil {
+			&m.Label, &m.Metered, &m.FirstSeen, &m.LastSeen, &m.Messages,
+			&m.Bytes); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -353,6 +390,38 @@ func (s *Store) ListSIMs() ([]SIM, error) {
 func (s *Store) SetSIMLabel(simID int64, label string) error {
 	_, err := s.db.Exec(`UPDATE sims SET label = ? WHERE id = ?`, label, simID)
 	return err
+}
+
+// SetMetered records whether this card's plan is metered — whether the ECM
+// link should be marked low-data while it is in the dongle. The flag lives on
+// the SIM, not on the dongle: the same interface is an expensive link with a
+// capped travel SIM in it and a free one with an unlimited card.
+func (s *Store) SetMetered(simID int64, on bool) error {
+	res, err := s.db.Exec(`UPDATE sims SET metered = ? WHERE id = ?`, on, simID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("no such sim %d", simID)
+	}
+	return nil
+}
+
+// Metered reports the flag for one SIM. A card with no row follows the default
+// rather than erroring: the reconciler asks about whatever CurrentID() returns,
+// and during a dongle blip that can briefly be a card nothing was written for
+// yet. Answering "metered" there is the quiet answer — answering "not metered"
+// would have the reconciler actively strip the flags off a link that should
+// be carrying them.
+func (s *Store) Metered(simID int64) (bool, error) {
+	on := meteredByDefault
+	switch err := s.db.QueryRow(
+		`SELECT metered FROM sims WHERE id = ?`, simID).Scan(&on); err {
+	case nil, sql.ErrNoRows:
+		return on, nil
+	default:
+		return false, err
+	}
 }
 
 // AdoptUnknown attributes every row still parked on the unknown SIM to simID.

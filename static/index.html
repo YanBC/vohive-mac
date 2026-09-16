@@ -125,15 +125,20 @@ button:disabled{background:var(--faint); color:var(--dim); cursor:wait; box-shad
 button.ghost{background:transparent; color:var(--dim); border:1px solid var(--line); padding:6px 12px; font-size:9px; margin-left:0}
 button.ghost:hover{color:var(--ph); border-color:var(--ph-dim)}
 /* cellular data switch: lit like an indicator lamp when on, dark when off */
-#databtn{transition:.25s}
-#databtn.on{
+#databtn,#meteredbtn{transition:.25s}
+#databtn.on,#meteredbtn.on{
   color:var(--ph); border-color:var(--ph-dim); background:rgba(87,227,137,.10);
   box-shadow:0 0 14px rgba(87,227,137,.35), inset 0 0 8px rgba(87,227,137,.12);
   text-shadow:0 0 8px rgba(87,227,137,.8);
 }
-#databtn.on:hover{border-color:var(--ph); box-shadow:0 0 18px rgba(87,227,137,.5), inset 0 0 8px rgba(87,227,137,.12)}
-#databtn.off{color:var(--faint); border-color:var(--line); background:rgba(0,0,0,.35); box-shadow:none; opacity:.65}
-#databtn.off:hover{opacity:1; color:var(--dim); border-color:var(--faint)}
+#databtn.on:hover,#meteredbtn.on:hover{border-color:var(--ph); box-shadow:0 0 18px rgba(87,227,137,.5), inset 0 0 8px rgba(87,227,137,.12)}
+#databtn.off,#meteredbtn.off{color:var(--faint); border-color:var(--line); background:rgba(0,0,0,.35); box-shadow:none; opacity:.65}
+#databtn.off:hover,#meteredbtn.off:hover{opacity:1; color:var(--dim); border-color:var(--faint)}
+/* the setting is on but the link is not carrying it (needs sudo, or no dongle) */
+#meteredbtn.pending{
+  color:var(--amber); border-color:var(--amber); background:rgba(224,164,85,.10);
+  box-shadow:0 0 12px rgba(224,164,85,.28); opacity:1;
+}
 .note{font-size:11px; padding:9px 12px; border:1px solid var(--line); display:none; white-space:pre-wrap}
 .note.ok{display:block; color:var(--ph); border-color:var(--ph-dim); background:rgba(87,227,137,.06)}
 .note.err{display:block; color:var(--red); border-color:#5c2626; background:rgba(224,85,85,.07)}
@@ -322,6 +327,7 @@ footer{margin-top:22px; font-size:10px; color:var(--faint); letter-spacing:.15em
   <section class="panel"><span class="tick"></span>
     <div class="inboxhead" style="margin:0 0 16px">
       <h2 style="margin:0;flex:1">Data Usage</h2>
+      <button class="ghost" type="button" id="meteredbtn" hidden>low data: —</button>
       <button class="ghost" type="button" id="databtn" hidden>data: —</button>
     </div>
     <div class="bignums">
@@ -413,7 +419,7 @@ $("simsel").addEventListener("change",()=>{
   viewSim=Number($("simsel").value);
   $("simhist").hidden=isCurrent();
   clearSelection();
-  pollTraffic(); loadInbox();
+  pollTraffic(); loadInbox(); loadMetered();
 });
 $("renamesim").addEventListener("click",async()=>{
   const sim=sims.find(s=>s.id===viewSim);
@@ -483,6 +489,54 @@ $("databtn").addEventListener("click",async()=>{
   }
   // the toggle reboots the dongle; let it re-enumerate before trusting status
   setTimeout(()=>{dataBusy=false; renderData(); pollStatus();},25000);
+});
+
+/* ---------------- low data mode ----------------
+   Marks the dongle's ECM link expensive+constrained so macOS backs its own
+   syncing off it, the way it does on an iPhone hotspot. The flag belongs to
+   the SIM's plan, so it is stored per card; applying it needs the server to
+   be running as root. */
+let metered=null;
+async function loadMetered(){
+  try{
+    const q=viewSim===null?"":"?sim="+viewSim;
+    const r=await fetch("/api/metered"+q);
+    metered=r.ok?await r.json():null;
+  }catch(e){ metered=null }
+  renderMetered();
+}
+function renderMetered(){
+  const b=$("meteredbtn");
+  if(!metered){ b.hidden=true; return }
+  b.hidden=false;
+  const on=metered.enabled;
+  // "pending" means the card is on a metered plan but the link is not marked:
+  // no root to set the flags, no dongle to set them on, or ifconfig refused
+  const pending=on && isCurrent() && !metered.applied;
+  b.textContent="low data: "+(on?(pending?"pending":"on"):"off");
+  b.classList.toggle("on",on&&!pending);
+  b.classList.toggle("off",!on);
+  b.classList.toggle("pending",pending);
+  b.title=pending
+    ?(metered.error||"the link is not marked yet")
+    :on?"macOS treats this link as expensive and constrained — system syncing, "
+        +"updates and backups hold off, as on an iPhone hotspot"
+       :"macOS treats this link as free wired Ethernet and will sync over it";
+}
+$("meteredbtn").addEventListener("click",async()=>{
+  if(!metered) return;
+  const target=!metered.enabled;
+  try{
+    const r=await fetch("/api/metered",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({enabled:target,sim_id:viewSim})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||r.statusText);
+    metered=j; renderMetered();
+    if(target && !j.privileged)
+      alert("Saved for this SIM, but marking the link needs root.\n\n"
+           +"Restart the server as:  sudo ./vohive-mac");
+  }catch(e){ alert("low data switch failed: "+e.message) }
 });
 
 /* pinField turns a code <input> into a row of slots. The input keeps doing the
@@ -809,13 +863,14 @@ $("movego").addEventListener("click",async()=>{
 });
 
 /* ---------------- boot ---------------- */
-loadSims().then(()=>{ pollTraffic(); loadInbox(); });
+loadSims().then(()=>{ pollTraffic(); loadInbox(); loadMetered(); });
 pollStatus();
 loadLock();
 setInterval(pollTraffic,3000);
 setInterval(pollStatus,12000);
 setInterval(loadInbox,60000);
 setInterval(loadSims,30000);
+setInterval(loadMetered,15000);
 setInterval(loadLock,60000); // pollStatus() re-reads it sooner on any +CPIN change
 </script>
 </body>

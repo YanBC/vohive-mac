@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -55,6 +57,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
+	// Marking the ECM link low-data needs root, so this process is normally
+	// started with sudo (see metered.go). SQLite's files would then be created
+	// root-owned and a later non-sudo run could not write them, so they are
+	// handed back to the user who invoked sudo.
+	restoreDataOwnership(*dataDir)
 	modem := NewModem()
 	sims := NewSIMRegistry(modem, store)
 	// resolve the card before anything writes a SIM-scoped row, so the first
@@ -64,13 +71,15 @@ func main() {
 	sims.Start()
 	traffic := NewTrafficTracker(store, sims)
 	traffic.Start()
+	metered := NewMeteredController(traffic, store, sims)
+	metered.Start()
 	archiver := NewArchiver(modem, store, sims, *archiveDelete)
 	archiver.Start()
 	watchdog := NewWatchdog(modem, traffic)
 	watchdog.Start()
 
 	srv := &http.Server{Addr: *addr,
-		Handler: NewServer(modem, traffic, store, archiver, sims).Handler()}
+		Handler: NewServer(modem, traffic, store, archiver, sims, metered).Handler()}
 
 	go func() {
 		log.Printf("vohive-mac listening on http://%s", *addr)
@@ -87,8 +96,38 @@ func main() {
 	defer cancel()
 	srv.Shutdown(ctx) //nolint:errcheck
 	watchdog.Stop()
+	metered.Stop()
 	archiver.Stop()
 	sims.Stop()
 	traffic.Stop()
 	store.Close() //nolint:errcheck
+}
+
+// restoreDataOwnership gives the database files back to the user who ran
+// sudo. The app is meant to run as root (that is the only way to set the
+// interface's low-data flags), but its data is the user's: without this, the
+// first sudo run leaves vohive.db and its WAL owned by root and a subsequent
+// plain `./vohive-mac` fails with "attempt to write a readonly database".
+//
+// Only the sudo case is handled: a genuine root login has no user to hand
+// the files to, and a non-root run never created root-owned files.
+func restoreDataOwnership(dataDir string) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	uid, err1 := strconv.Atoi(os.Getenv("SUDO_UID"))
+	gid, err2 := strconv.Atoi(os.Getenv("SUDO_GID"))
+	if err1 != nil || err2 != nil || uid == 0 {
+		return
+	}
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		path := filepath.Join(dataDir, e.Name())
+		if err := os.Chown(path, uid, gid); err != nil {
+			log.Printf("hand %s back to uid %d: %v", path, uid, err)
+		}
+	}
 }

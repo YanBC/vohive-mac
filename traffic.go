@@ -67,6 +67,7 @@ type TrafficTracker struct {
 	today     DayUsage
 	iface     string
 	up        bool
+	link      linkState // last ifconfig parse: link + low-data flags
 	lastRx    uint64
 	lastTx    uint64
 	haveLast  bool
@@ -96,18 +97,6 @@ func resolveIface() string {
 		return string(m[1])
 	}
 	return ""
-}
-
-// linkActive reports whether the interface's link is actually up. The ECM
-// function asserts link state itself; after sleep/wake it can stay down
-// (ifconfig "status: inactive") even though the interface still exists and
-// netstat still lists it, so counter readability must not be used as "up".
-func linkActive(iface string) bool {
-	out, err := exec.Command("ifconfig", iface).Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(out), "status: active")
 }
 
 // readCounters parses `netstat -ibn` for the interface's Link-level row.
@@ -202,12 +191,13 @@ func (t *TrafficTracker) sample() {
 	}
 	rx, tx, ok := t.readIface()
 	if !ok {
-		t.up = false
+		t.up, t.link = false, linkState{}
 		t.haveLast = false
 		t.history = appendPoint(t.history, RatePoint{T: now.Unix()})
 		return
 	}
-	t.up = linkActive(t.iface)
+	t.link = readLinkState(t.iface)
+	t.up = t.link.up
 
 	if t.haveLast {
 		drx := counterDelta(rx, t.lastRx)
@@ -285,6 +275,15 @@ func (t *TrafficTracker) LinkState() (iface string, up bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.iface, t.up
+}
+
+// MeteredLink returns the ECM interface and its last parsed state. Reusing
+// the sampler's ifconfig output keeps the metered reconciler from spawning one
+// of its own every few seconds.
+func (t *TrafficTracker) MeteredLink() (iface string, link linkState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.iface, t.link
 }
 
 func (t *TrafficTracker) Snapshot() TrafficSnapshot {

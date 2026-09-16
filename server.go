@@ -23,14 +23,17 @@ type Server struct {
 	store    *Store
 	archiver *Archiver
 	sims     *SIMRegistry
+	metered  *MeteredController
 
 	statusMu   sync.Mutex
 	statusVal  Status
 	statusTime time.Time
 }
 
-func NewServer(m *Modem, t *TrafficTracker, s *Store, a *Archiver, sims *SIMRegistry) *Server {
-	return &Server{modem: m, traffic: t, store: s, archiver: a, sims: sims}
+func NewServer(m *Modem, t *TrafficTracker, s *Store, a *Archiver,
+	sims *SIMRegistry, metered *MeteredController) *Server {
+	return &Server{modem: m, traffic: t, store: s, archiver: a, sims: sims,
+		metered: metered}
 }
 
 // simParam resolves the ?sim=<id> query parameter, defaulting to the SIM
@@ -222,6 +225,52 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleMetered reads (GET) or sets (POST {"enabled":bool,"sim_id":N}) whether
+// the SIM's plan is metered — whether the dongle's ECM link should be marked
+// low-data for macOS. sim_id defaults to the card in the dongle; setting it
+// for any other SIM stores the preference for when that card goes back in.
+//
+// Unlike /api/data this changes nothing on the modem and costs no AT traffic:
+// it is a flag on the macOS interface, applied by MeteredController.
+func (s *Server) handleMetered(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		simID, err := s.simParam(r)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		st, err := s.metered.State(simID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+	case http.MethodPost:
+		var req struct {
+			Enabled bool   `json:"enabled"`
+			SimID   *int64 `json:"sim_id"` // nil: the card in the dongle
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		simID := s.sims.CurrentID()
+		if req.SimID != nil {
+			simID = *req.SimID
+		}
+		st, err := s.metered.Set(simID, req.Enabled)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		log.Printf("sim %d marked %s", simID, onOff(req.Enabled))
+		writeJSON(w, http.StatusOK, st)
+	default:
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+	}
+}
+
 // invalidateStatus drops the cached status so the next UI poll sees the modem
 // as it is now rather than as it was up to 5 s ago.
 func (s *Server) invalidateStatus() {
@@ -394,6 +443,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/sims", s.handleSims)
 	mux.HandleFunc("/api/traffic", s.handleTraffic)
 	mux.HandleFunc("/api/data", s.handleData)
+	mux.HandleFunc("/api/metered", s.handleMetered)
 	mux.HandleFunc("/api/sim/lock", s.handleSIMLock)
 	mux.HandleFunc("/api/sim/unlock", s.handleSIMUnlock)
 	mux.HandleFunc("/api/sim/pin", s.handleSIMPIN)
