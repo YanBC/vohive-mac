@@ -1,5 +1,7 @@
 # vohive-mac
 
+**English** | [简体中文](README.zh-CN.md)
+
 A minimal SIM-card management platform for **macOS**, inspired by
 [VoHive](https://github.com/iniwex5/vohive) (which targets Linux). It drives a
 BAIWANG/Quectel-style 4G USB dongle **entirely from userspace over raw USB**
