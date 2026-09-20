@@ -1,6 +1,7 @@
-// Minimal SMS-DELIVER PDU decoder: GSM7 / UCS2 / 8-bit, UDH-aware,
-// with reassembly of concatenated messages.
-package main
+// Package pdu is a minimal SMS-DELIVER PDU decoder: GSM7 / UCS2 / 8-bit,
+// UDH-aware, exposing the concatenation header so callers can reassemble
+// multi-part messages. Pure functions, no I/O.
+package pdu
 
 import (
 	"encoding/hex"
@@ -18,14 +19,15 @@ var gsm7Ext = map[byte]rune{
 	0x3C: '[', 0x3D: '~', 0x3E: ']', 0x40: '|', 0x65: '€',
 }
 
-type pduRecord struct {
-	index     int
-	sender    string
-	timestamp string
-	text      string
-	concatRef int // -1 when not concatenated
-	concatTot int
-	concatSeq int
+// Record is one decoded message, as it sits in a modem storage slot.
+type Record struct {
+	Index     int
+	Sender    string
+	Timestamp string
+	Text      string
+	ConcatRef int // -1 when not concatenated
+	ConcatTot int
+	ConcatSeq int
 }
 
 func swapNibbles(s string) string {
@@ -77,7 +79,8 @@ func decodeGSM7(data []byte, septetCount, skipSeptets int) string {
 	return sb.String()
 }
 
-func decodePDU(pduHex string) (*pduRecord, error) {
+// Decode decodes one hex-encoded SMS-DELIVER PDU.
+func Decode(pduHex string) (*Record, error) {
 	raw, err := hex.DecodeString(strings.TrimSpace(pduHex))
 	if err != nil {
 		return nil, fmt.Errorf("bad hex: %w", err)
@@ -153,7 +156,7 @@ func decodePDU(pduHex string) (*pduRecord, error) {
 	pos++
 	ud := raw[pos:]
 
-	rec := &pduRecord{sender: sender, timestamp: timestamp, concatRef: -1}
+	rec := &Record{Sender: sender, Timestamp: timestamp, ConcatRef: -1}
 
 	udhLen := 0
 	if hasUDH && len(ud) > 0 {
@@ -168,13 +171,13 @@ func decodePDU(pduHex string) (*pduRecord, error) {
 			}
 			switch {
 			case iei == 0x00 && ielen == 3:
-				rec.concatRef = int(ud[i+2])
-				rec.concatTot = int(ud[i+3])
-				rec.concatSeq = int(ud[i+4])
+				rec.ConcatRef = int(ud[i+2])
+				rec.ConcatTot = int(ud[i+3])
+				rec.ConcatSeq = int(ud[i+4])
 			case iei == 0x08 && ielen == 4:
-				rec.concatRef = int(ud[i+2])<<8 | int(ud[i+3])
-				rec.concatTot = int(ud[i+4])
-				rec.concatSeq = int(ud[i+5])
+				rec.ConcatRef = int(ud[i+2])<<8 | int(ud[i+3])
+				rec.ConcatTot = int(ud[i+4])
+				rec.ConcatSeq = int(ud[i+5])
 			}
 			i += 2 + ielen
 		}
@@ -202,15 +205,15 @@ func decodePDU(pduHex string) (*pduRecord, error) {
 		for i := 0; i+1 < len(body); i += 2 {
 			codes = append(codes, uint16(body[i])<<8|uint16(body[i+1]))
 		}
-		rec.text = string(utf16.Decode(codes))
+		rec.Text = string(utf16.Decode(codes))
 	case 1:
-		rec.text = "<binary: " + hex.EncodeToString(ud[udhLen:]) + ">"
+		rec.Text = "<binary: " + hex.EncodeToString(ud[udhLen:]) + ">"
 	default:
 		skip := 0
 		if udhLen > 0 {
 			skip = (udhLen*8 + 6) / 7
 		}
-		rec.text = decodeGSM7(ud, int(udl), skip)
+		rec.Text = decodeGSM7(ud, int(udl), skip)
 	}
 	return rec, nil
 }

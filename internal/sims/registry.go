@@ -6,36 +6,43 @@
 // that writes SIM-scoped rows asks the registry (a mutex read, no USB I/O);
 // only this file's poller touches the modem, so the 3 s traffic sampler never
 // blocks on the AT port.
-package main
+package sims
 
 import (
 	"log"
 	"sync"
 	"time"
+
+	"vohive-mac/internal/modem"
+	"vohive-mac/internal/sim"
+	"vohive-mac/internal/store"
 )
 
-const simPollInterval = 30 * time.Second
+const pollInterval = 30 * time.Second
 
-type SIMRegistry struct {
-	modem *Modem
-	store *Store
+// Registry tracks which card is in the dongle and which `sims` row it maps to.
+type Registry struct {
+	modem *modem.Modem
+	store *store.Store
 
 	mu   sync.RWMutex
 	id   int64
-	info SIMIdentity
+	info sim.Identity
 	ok   bool
 
 	adoptOnce sync.Once
 	stop      chan struct{}
 }
 
-func NewSIMRegistry(m *Modem, s *Store) *SIMRegistry {
-	return &SIMRegistry{modem: m, store: s, id: unknownSIM, stop: make(chan struct{})}
+// New returns a registry; call Refresh for the first reading and Start to
+// keep it current.
+func New(m *modem.Modem, s *store.Store) *Registry {
+	return &Registry{modem: m, store: s, id: store.UnknownSIM, stop: make(chan struct{})}
 }
 
-func (r *SIMRegistry) Start() {
+func (r *Registry) Start() {
 	go func() {
-		ticker := time.NewTicker(simPollInterval)
+		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		r.Refresh()
 		for {
@@ -49,13 +56,13 @@ func (r *SIMRegistry) Start() {
 	}()
 }
 
-func (r *SIMRegistry) Stop() { close(r.stop) }
+func (r *Registry) Stop() { close(r.stop) }
 
 // Refresh re-reads the SIM from the modem and upserts it. A read failure (AT
 // port down, dongle unplugged, modem rebooting) is not a swap: the last known
 // SIM stays current, so traffic and messages keep their attribution instead of
 // falling into the unknown bucket every time the dongle blips.
-func (r *SIMRegistry) Refresh() {
+func (r *Registry) Refresh() {
 	info, err := r.modem.SIMInfo()
 	if err != nil {
 		return
@@ -75,9 +82,9 @@ func (r *SIMRegistry) Refresh() {
 		return
 	}
 	if hadPrev && prev.ICCID != info.ICCID {
-		log.Printf("SIM swapped: %s -> %s (sim %d)", prev.defaultLabel(), info.defaultLabel(), id)
+		log.Printf("SIM swapped: %s -> %s (sim %d)", prev.DefaultLabel(), info.DefaultLabel(), id)
 	} else if !hadPrev {
-		log.Printf("SIM: %s (iccid %s, sim %d)", info.defaultLabel(), info.ICCID, id)
+		log.Printf("SIM: %s (iccid %s, sim %d)", info.DefaultLabel(), info.ICCID, id)
 	}
 
 	r.mu.Lock()
@@ -94,21 +101,21 @@ func (r *SIMRegistry) Refresh() {
 		}
 		if msgs > 0 || days > 0 {
 			log.Printf("attributed %d message(s) and %d usage day(s) to %s",
-				msgs, days, info.defaultLabel())
+				msgs, days, info.DefaultLabel())
 		}
 	})
 }
 
 // Current returns the SIM in the dongle. ok is false until one is identified;
-// callers that must write a row anyway use unknownSIM.
-func (r *SIMRegistry) Current() (id int64, info SIMIdentity, ok bool) {
+// callers that must write a row anyway use store.UnknownSIM.
+func (r *Registry) Current() (id int64, info sim.Identity, ok bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.id, r.info, r.ok
 }
 
 // CurrentID is Current() for callers that only need somewhere to put the row.
-func (r *SIMRegistry) CurrentID() int64 {
+func (r *Registry) CurrentID() int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.id

@@ -4,7 +4,7 @@
 // interfaces, so we talk to the AT port directly over USB bulk transfers
 // via libusb (gousb). One Modem owns the interface for the whole process;
 // commands are serialized with a mutex.
-package main
+package modem
 
 import (
 	"context"
@@ -19,6 +19,9 @@ import (
 	"unicode/utf16"
 
 	"github.com/google/gousb"
+
+	"vohive-mac/internal/pdu"
+	"vohive-mac/internal/sim"
 )
 
 var (
@@ -60,7 +63,7 @@ type Modem struct {
 
 	// SIM identity: NOT fixed — the card can be swapped under us, so this is
 	// re-validated against the ICCID on a TTL rather than cached forever.
-	simCache SIMIdentity
+	simCache sim.Identity
 	simOK    bool
 	simTime  time.Time
 
@@ -71,7 +74,8 @@ type Modem struct {
 	rebootUntil atomic.Int64
 }
 
-func NewModem() *Modem { return &Modem{} }
+// New returns a Modem that connects lazily on its first command.
+func New() *Modem { return &Modem{} }
 
 // ---------------------------------------------------------------- connection
 
@@ -455,7 +459,7 @@ func (m *Modem) sendOneLocked(to, chunk string) (int, error) {
 
 // ListStorage returns all decodable messages in one storage ("SM" or "ME"),
 // with their slot indexes, without merging concatenated parts.
-func (m *Modem) ListStorage(storage string) ([]pduRecord, error) {
+func (m *Modem) ListStorage(storage string) ([]pdu.Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// select <mem1> (the read/list/delete storage) only
@@ -470,7 +474,7 @@ func (m *Modem) ListStorage(storage string) ([]pduRecord, error) {
 		return nil, err
 	}
 
-	var raw []pduRecord
+	var raw []pdu.Record
 	lines := strings.Split(strings.ReplaceAll(resp, "\r", ""), "\n")
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
@@ -483,11 +487,11 @@ func (m *Modem) ListStorage(storage string) ([]pduRecord, error) {
 		if i+1 >= len(lines) {
 			break
 		}
-		dec, derr := decodePDU(strings.TrimSpace(lines[i+1]))
+		dec, derr := pdu.Decode(strings.TrimSpace(lines[i+1]))
 		if derr != nil {
 			continue // skip undecodable entries rather than failing the list
 		}
-		dec.index = idx
+		dec.Index = idx
 		raw = append(raw, *dec)
 		i++
 	}
@@ -518,78 +522,6 @@ func (m *Modem) DeleteMessages(storage string, indexes []int) error {
 // the ICCID (one AT command), so a card swap is noticed within this window.
 const simCacheTTL = 30 * time.Second
 
-// SIMIdentity is the card currently in the dongle. ICCID is the identity: it
-// is printed on the card and always readable. Number (AT+CNUM) is blank on
-// most prepaid/MVNO SIMs — treat it as a label, never as a key.
-type SIMIdentity struct {
-	ICCID    string `json:"iccid"`
-	IMSI     string `json:"imsi,omitempty"`
-	Number   string `json:"number,omitempty"`
-	Operator string `json:"operator,omitempty"`
-}
-
-// iccidTail is the abbreviated ICCID older builds used in generated labels.
-// Nothing produces it any more — the whole point of showing a card its ICCID
-// is telling two unnamed cards apart, and the last six digits of two ICCIDs
-// from the same batch can be all that differs — but it is still the form
-// stored in every row written before that change, so isGeneratedLabel has to
-// keep recognising it. Databases are rewritten to the full ICCID by migrate().
-func (s SIMIdentity) iccidTail() string {
-	if len(s.ICCID) > 6 {
-		return "…" + s.ICCID[len(s.ICCID)-6:]
-	}
-	return s.ICCID
-}
-
-// defaultLabel is what the UI shows for a SIM until the user renames it.
-func (s SIMIdentity) defaultLabel() string {
-	if s.Number != "" {
-		return s.Number
-	}
-	if s.Operator != "" {
-		return s.Operator + " " + s.ICCID
-	}
-	return s.ICCID
-}
-
-// isGeneratedLabel reports whether label is one this app could have produced
-// for this card, rather than a name the user typed.
-//
-// It has to check every form defaultLabel can emit, not just today's, because
-// a label and the identity beside it are not written in lockstep: the identity
-// is refreshed on every sighting, while the label is written once. A card
-// first seen at its PIN prompt is labelled with its ICCID and then learns its
-// number, so the two are legitimately out of step — comparing the label
-// against the *current* default would read that placeholder as a user's choice
-// and pin it forever.
-func (s SIMIdentity) isGeneratedLabel(label string) bool {
-	if label == "" || label == s.ICCID || label == s.iccidTail() {
-		return true
-	}
-	if s.Number != "" && label == s.Number {
-		return true
-	}
-	if s.Operator == "" {
-		return false
-	}
-	return label == s.Operator+" "+s.ICCID || label == s.Operator+" "+s.iccidTail()
-}
-
-// digitsOf keeps the characters an ICCID/IMSI may contain (ICCIDs are
-// sometimes padded with 'F' nibbles) and drops AT framing noise.
-func digitsOf(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == 'F' || r == 'f':
-			b.WriteRune('F')
-		}
-	}
-	return b.String()
-}
-
 // readICCIDLocked tries the vendor variants in turn; firmwares disagree on
 // which one they answer to.
 func (m *Modem) readICCIDLocked() string {
@@ -606,7 +538,7 @@ func (m *Modem) readICCIDLocked() string {
 			for _, p := range []string{"+QCCID:", "+CCID:", "+ICCID:"} {
 				line = strings.TrimPrefix(line, p)
 			}
-			if d := digitsOf(line); len(d) >= 18 {
+			if d := sim.Digits(line); len(d) >= 18 {
 				return d
 			}
 		}
@@ -617,7 +549,7 @@ func (m *Modem) readICCIDLocked() string {
 // simInfoLocked returns the current SIM, re-reading it when the cache expires.
 // A cheap ICCID read decides whether the rest is still valid, so the common
 // case (same card) costs one AT command per TTL.
-func (m *Modem) simInfoLocked() (SIMIdentity, error) {
+func (m *Modem) simInfoLocked() (sim.Identity, error) {
 	if m.simOK && time.Since(m.simTime) < simCacheTTL {
 		return m.simCache, nil
 	}
@@ -625,13 +557,13 @@ func (m *Modem) simInfoLocked() (SIMIdentity, error) {
 		if m.simOK {
 			return m.simCache, nil // the card cannot have changed mid-reboot
 		}
-		return SIMIdentity{}, fmt.Errorf("modem rebooting")
+		return sim.Identity{}, fmt.Errorf("modem rebooting")
 	}
 
 	iccid := m.readICCIDLocked()
 	if iccid == "" {
 		m.simOK = false
-		return SIMIdentity{}, fmt.Errorf("no SIM (ICCID unreadable)")
+		return sim.Identity{}, fmt.Errorf("no SIM (ICCID unreadable)")
 	}
 	// Same card, and we already have a number for it: nothing else to read.
 	// A blank cached number is re-queried — CNUM can start answering once the
@@ -641,10 +573,10 @@ func (m *Modem) simInfoLocked() (SIMIdentity, error) {
 		return m.simCache, nil
 	}
 
-	id := SIMIdentity{ICCID: iccid}
+	id := sim.Identity{ICCID: iccid}
 	if r, err := m.cmdLocked("AT+CIMI", 4*time.Second); err == nil {
 		for _, line := range strings.Split(r, "\n") {
-			if d := digitsOf(strings.TrimSpace(line)); len(d) >= 14 && len(d) <= 15 {
+			if d := sim.Digits(strings.TrimSpace(line)); len(d) >= 14 && len(d) <= 15 {
 				id.IMSI = d
 				break
 			}
@@ -667,7 +599,7 @@ func (m *Modem) simInfoLocked() (SIMIdentity, error) {
 }
 
 // SIMInfo returns the SIM currently in the dongle.
-func (m *Modem) SIMInfo() (SIMIdentity, error) {
+func (m *Modem) SIMInfo() (sim.Identity, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.simInfoLocked()
@@ -740,9 +672,9 @@ func (m *Modem) Status() Status {
 	st.IMEI = m.infoCache["imei"]
 
 	// the SIM (unlike the IMEI/model) can be swapped, so this is TTL-cached
-	if sim, err := m.simInfoLocked(); err == nil {
-		st.OwnNumber = sim.Number
-		st.ICCID = sim.ICCID
+	if id, err := m.simInfoLocked(); err == nil {
+		st.OwnNumber = id.Number
+		st.ICCID = id.ICCID
 	}
 
 	if r, err := m.cmdLocked("AT+CSQ", 4*time.Second); err == nil {

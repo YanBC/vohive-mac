@@ -1,9 +1,11 @@
-package main
+package store
 
 import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+
+	"vohive-mac/internal/sim"
 )
 
 // legacySchema is the pre-SIM schema (schemaVersion 0), reproduced verbatim so
@@ -54,9 +56,9 @@ func seedLegacyDB(t *testing.T) string {
 
 func openStore(t *testing.T, dir string) *Store {
 	t.Helper()
-	s, err := OpenStore(dir)
+	s, err := Open(dir)
 	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
@@ -75,7 +77,7 @@ func TestMigrateLegacyPreservesHistory(t *testing.T) {
 		t.Errorf("user_version = %d, want %d", version, schemaVersion)
 	}
 
-	msgs, err := s.ListMessages(unknownSIM, 100)
+	msgs, err := s.ListMessages(UnknownSIM, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +85,7 @@ func TestMigrateLegacyPreservesHistory(t *testing.T) {
 		t.Fatalf("got %d messages after migration, want 2", len(msgs))
 	}
 
-	days, err := s.RecentDays(unknownSIM, 100)
+	days, err := s.RecentDays(UnknownSIM, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,14 +110,14 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	s1.Close()
 	s2 := openStore(t, dir)
 
-	msgs, err := s2.ListMessages(unknownSIM, 100)
+	msgs, err := s2.ListMessages(UnknownSIM, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(msgs) != 2 {
 		t.Errorf("got %d messages after reopen, want 2", len(msgs))
 	}
-	days, err := s2.RecentDays(unknownSIM, 100)
+	days, err := s2.RecentDays(UnknownSIM, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,12 +132,12 @@ func TestMigrateIsIdempotent(t *testing.T) {
 func TestAdoptUnknown(t *testing.T) {
 	s := openStore(t, seedLegacyDB(t))
 
-	simID, err := s.EnsureSIM(SIMIdentity{
+	simID, err := s.EnsureSIM(sim.Identity{
 		ICCID: "89860025128748043019", Number: "+8613700137000", Operator: "CMCC"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if simID == unknownSIM {
+	if simID == UnknownSIM {
 		t.Fatal("EnsureSIM returned the unknown SIM id")
 	}
 	// a day the tracker already wrote for this SIM before adoption ran
@@ -154,12 +156,12 @@ func TestAdoptUnknown(t *testing.T) {
 		t.Errorf("adopted %d usage days, want 2", days)
 	}
 
-	if left, err := s.ListMessages(unknownSIM, 100); err != nil {
+	if left, err := s.ListMessages(UnknownSIM, 100); err != nil {
 		t.Fatal(err)
 	} else if len(left) != 0 {
 		t.Errorf("%d messages still on the unknown SIM", len(left))
 	}
-	if left, err := s.RecentDays(unknownSIM, 100); err != nil {
+	if left, err := s.RecentDays(UnknownSIM, 100); err != nil {
 		t.Fatal(err)
 	} else if len(left) != 0 {
 		t.Errorf("%d usage days still on the unknown SIM", len(left))
@@ -202,7 +204,7 @@ func TestReassignSurvivesRestart(t *testing.T) {
 	dir := seedLegacyDB(t)
 	s := openStore(t, dir)
 
-	simID, err := s.EnsureSIM(SIMIdentity{ICCID: "89860025128748043019"})
+	simID, err := s.EnsureSIM(sim.Identity{ICCID: "89860025128748043019"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +220,7 @@ func TestReassignSurvivesRestart(t *testing.T) {
 	}
 
 	// "this one is from my old carrier's SIM" — send it back to the unknown SIM
-	moved, skipped, err := s.ReassignMessages(unknownSIM, []int64{msgs[0].ID})
+	moved, skipped, err := s.ReassignMessages(UnknownSIM, []int64{msgs[0].ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,14 +231,14 @@ func TestReassignSurvivesRestart(t *testing.T) {
 
 	// restart: adoption must not undo the correction
 	s2 := openStore(t, dir)
-	simID2, err := s2.EnsureSIM(SIMIdentity{ICCID: "89860025128748043019"})
+	simID2, err := s2.EnsureSIM(sim.Identity{ICCID: "89860025128748043019"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m, d, err := s2.AdoptUnknown(simID2); err != nil || m != 0 || d != 0 {
 		t.Errorf("AdoptUnknown after restart: (%d, %d, %v), want (0, 0, nil)", m, d, err)
 	}
-	left, err := s2.ListMessages(unknownSIM, 100)
+	left, err := s2.ListMessages(UnknownSIM, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,11 +252,11 @@ func TestReassignSurvivesRestart(t *testing.T) {
 func TestReassignSkipsDuplicate(t *testing.T) {
 	s := openStore(t, t.TempDir())
 
-	simA, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000001"})
+	simA, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000001"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	simB, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000002"})
+	simB, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000002"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,11 +289,11 @@ func TestReassignSkipsDuplicate(t *testing.T) {
 func TestPerSIMIsolation(t *testing.T) {
 	s := openStore(t, t.TempDir())
 
-	simA, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000001", Number: "+8613700137001"})
+	simA, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000001", Number: "+8613700137001"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	simB, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000002"})
+	simB, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000002"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +341,7 @@ func TestPerSIMIsolation(t *testing.T) {
 func TestEnsureSIMKeepsUserLabel(t *testing.T) {
 	s := openStore(t, t.TempDir())
 
-	id, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000003"})
+	id, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000003"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +349,7 @@ func TestEnsureSIMKeepsUserLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 	// seen again, now with a number the operator has since provisioned
-	if _, err := s.EnsureSIM(SIMIdentity{
+	if _, err := s.EnsureSIM(sim.Identity{
 		ICCID: "8986000000000000003", Number: "+8613700137003", Operator: "CMCC"}); err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +381,7 @@ func TestEnsureSIMUpgradesGeneratedLabel(t *testing.T) {
 	s := openStore(t, t.TempDir())
 
 	// PIN-locked: AT+CIMI/+CNUM/+COPS all refuse, only the ICCID answers
-	locked := SIMIdentity{ICCID: "8986000000000000004"}
+	locked := sim.Identity{ICCID: "8986000000000000004"}
 	id, err := s.EnsureSIM(locked)
 	if err != nil {
 		t.Fatal(err)
@@ -389,7 +391,7 @@ func TestEnsureSIMUpgradesGeneratedLabel(t *testing.T) {
 	}
 
 	// unlocked: the same card, now fully readable
-	open := SIMIdentity{ICCID: "8986000000000000004", IMSI: "460099948800096",
+	open := sim.Identity{ICCID: "8986000000000000004", IMSI: "460099948800096",
 		Number: "+8613700137004", Operator: "Mi Mobile"}
 	if _, err := s.EnsureSIM(open); err != nil {
 		t.Fatal(err)
@@ -408,7 +410,7 @@ func TestEnsureSIMUpgradesStaleGeneratedLabel(t *testing.T) {
 	dir := t.TempDir()
 	s := openStore(t, dir)
 
-	id, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000005"})
+	id, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000005"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +426,7 @@ func TestEnsureSIMUpgradesStaleGeneratedLabel(t *testing.T) {
 		t.Fatalf("setup: label = %q, want the stale ICCID tail", got)
 	}
 
-	if _, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000005",
+	if _, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000005",
 		Number: "+8613700137005", Operator: "Mi Mobile"}); err != nil {
 		t.Fatal(err)
 	}
@@ -441,18 +443,18 @@ func TestEnsureSIMUpgradesStaleGeneratedLabel(t *testing.T) {
 func TestEnsureSIMKeepsIdentityWhenLocked(t *testing.T) {
 	s := openStore(t, t.TempDir())
 
-	open := SIMIdentity{ICCID: "8986000000000000006", IMSI: "460099948800096",
+	open := sim.Identity{ICCID: "8986000000000000006", IMSI: "460099948800096",
 		Number: "+8613700137006", Operator: "Mi Mobile"}
 	id, err := s.EnsureSIM(open)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// replugged: the card is back at its PIN prompt
-	if _, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000006"}); err != nil {
+	if _, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000006"}); err != nil {
 		t.Fatal(err)
 	}
 
-	var got SIMIdentity
+	var got sim.Identity
 	var label string
 	if err := s.db.QueryRow(
 		`SELECT imsi, number, operator, label FROM sims WHERE id = ?`, id).
@@ -472,7 +474,7 @@ func TestEnsureSIMKeepsIdentityWhenLocked(t *testing.T) {
 func TestEnsureSIMKeepsUserLabelWhenLocked(t *testing.T) {
 	s := openStore(t, t.TempDir())
 
-	id, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000007",
+	id, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000007",
 		Number: "+8613700137007", Operator: "Mi Mobile"})
 	if err != nil {
 		t.Fatal(err)
@@ -480,7 +482,7 @@ func TestEnsureSIMKeepsUserLabelWhenLocked(t *testing.T) {
 	if err := s.SetSIMLabel(id, "travel sim"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000007"}); err != nil {
+	if _, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000007"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := labelOf(t, s, id); got != "travel sim" {
@@ -497,11 +499,11 @@ func TestMigrateExpandsTruncatedLabels(t *testing.T) {
 	dir := t.TempDir()
 	s := openStore(t, dir)
 
-	bare := SIMIdentity{ICCID: "8986000000000000006"}
-	withOp := SIMIdentity{ICCID: "8986000000000000007", Operator: "Mi Mobile"}
-	named := SIMIdentity{ICCID: "8986000000000000008"}
+	bare := sim.Identity{ICCID: "8986000000000000006"}
+	withOp := sim.Identity{ICCID: "8986000000000000007", Operator: "Mi Mobile"}
+	named := sim.Identity{ICCID: "8986000000000000008"}
 	ids := map[string]int64{}
-	for _, id := range []SIMIdentity{bare, withOp, named} {
+	for _, id := range []sim.Identity{bare, withOp, named} {
 		rowID, err := s.EnsureSIM(id)
 		if err != nil {
 			t.Fatal(err)
@@ -564,11 +566,11 @@ func labelOf(t *testing.T, s *Store, simID int64) string {
 func TestMonthUsage(t *testing.T) {
 	s := openStore(t, t.TempDir())
 
-	simA, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000004"})
+	simA, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000004"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	simB, err := s.EnsureSIM(SIMIdentity{ICCID: "8986000000000000005"})
+	simB, err := s.EnsureSIM(sim.Identity{ICCID: "8986000000000000005"})
 	if err != nil {
 		t.Fatal(err)
 	}

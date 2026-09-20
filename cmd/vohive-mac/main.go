@@ -16,6 +16,15 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"vohive-mac/internal/archive"
+	"vohive-mac/internal/metered"
+	"vohive-mac/internal/modem"
+	"vohive-mac/internal/netif"
+	"vohive-mac/internal/recovery"
+	"vohive-mac/internal/server"
+	"vohive-mac/internal/sims"
+	"vohive-mac/internal/store"
 )
 
 // runATCLI implements `vohive-mac at 'AT+CSQ' ...` — an ad-hoc AT command
@@ -26,9 +35,9 @@ func runATCLI(cmds []string) {
 		fmt.Fprintln(os.Stderr, "usage: vohive-mac at 'AT+CMD' ['AT+CMD2' ...]")
 		os.Exit(2)
 	}
-	modem := NewModem()
+	m := modem.New()
 	for _, c := range cmds {
-		resp, err := modem.Cmd(c, 15*time.Second)
+		resp, err := m.Cmd(c, 15*time.Second)
 		fmt.Printf(">>> %s\n%s\n", c, strings.TrimSpace(resp))
 		if err != nil && strings.TrimSpace(resp) == "" {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -53,33 +62,33 @@ func main() {
 		log.Fatalf("data dir: %v", err)
 	}
 
-	store, err := OpenStore(*dataDir)
+	st, err := store.Open(*dataDir)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
 	// Marking the ECM link low-data needs root, so this process is normally
-	// started with sudo (see metered.go). SQLite's files would then be created
-	// root-owned and a later non-sudo run could not write them, so they are
-	// handed back to the user who invoked sudo.
+	// started with sudo (see the metered package). SQLite's files would then
+	// be created root-owned and a later non-sudo run could not write them, so
+	// they are handed back to the user who invoked sudo.
 	restoreDataOwnership(*dataDir)
-	modem := NewModem()
-	sims := NewSIMRegistry(modem, store)
+	m := modem.New()
+	registry := sims.New(m, st)
 	// resolve the card before anything writes a SIM-scoped row, so the first
 	// bytes and messages of the process are attributed to it rather than to
 	// the unknown SIM (if the dongle is absent, the poller picks it up later)
-	sims.Refresh()
-	sims.Start()
-	traffic := NewTrafficTracker(store, sims)
+	registry.Refresh()
+	registry.Start()
+	traffic := netif.NewTracker(st, registry)
 	traffic.Start()
-	metered := NewMeteredController(traffic, store, sims)
-	metered.Start()
-	archiver := NewArchiver(modem, store, sims, *archiveDelete)
+	meter := metered.New(traffic, st, registry)
+	meter.Start()
+	archiver := archive.New(m, st, registry, *archiveDelete)
 	archiver.Start()
-	watchdog := NewWatchdog(modem, traffic)
+	watchdog := recovery.New(m, traffic)
 	watchdog.Start()
 
 	srv := &http.Server{Addr: *addr,
-		Handler: NewServer(modem, traffic, store, archiver, sims, metered).Handler()}
+		Handler: server.New(m, traffic, st, archiver, registry, meter).Handler()}
 
 	go func() {
 		log.Printf("vohive-mac listening on http://%s", *addr)
@@ -96,11 +105,11 @@ func main() {
 	defer cancel()
 	srv.Shutdown(ctx) //nolint:errcheck
 	watchdog.Stop()
-	metered.Stop()
+	meter.Stop()
 	archiver.Stop()
-	sims.Stop()
+	registry.Stop()
 	traffic.Stop()
-	store.Close() //nolint:errcheck
+	st.Close() //nolint:errcheck
 }
 
 // restoreDataOwnership gives the database files back to the user who ran

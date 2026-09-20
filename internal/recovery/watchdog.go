@@ -25,12 +25,15 @@
 // There is a second failure mode with the opposite signature — the link up
 // and healthy, carrying IPv6, but with no IPv4 address at all — which the
 // trigger above deliberately does not catch and healDHCP handles instead.
-package main
+package recovery
 
 import (
 	"log"
 	"strings"
 	"time"
+
+	"vohive-mac/internal/modem"
+	"vohive-mac/internal/netif"
 )
 
 const (
@@ -52,13 +55,17 @@ const (
 	dhcpRebootLimit = 3
 )
 
+// Watchdog recovers the ECM data link after the two failures the dongle's
+// firmware leaves behind: a link that never comes back after sleep, and a
+// link that comes back without an IPv4 lease.
 type Watchdog struct {
-	modem   *Modem
-	traffic *TrafficTracker
+	modem   *modem.Modem
+	traffic *netif.Tracker
 	stop    chan struct{}
 }
 
-func NewWatchdog(m *Modem, t *TrafficTracker) *Watchdog {
+// New returns a watchdog; call Start to begin watching.
+func New(m *modem.Modem, t *netif.Tracker) *Watchdog {
 	return &Watchdog{modem: m, traffic: t, stop: make(chan struct{})}
 }
 
@@ -116,11 +123,11 @@ func (w *Watchdog) run() {
 			downSince, heal.noV4Since = time.Time{}, time.Time{}
 			continue
 		}
-		if link.up {
+		if link.Up {
 			// The link being up is not the same as it carrying traffic: the
 			// ECM side can be perfectly alive over IPv6 with no IPv4 lease.
 			downSince = time.Time{}
-			if link.routableV4 {
+			if link.RoutableV4 {
 				heal = dhcpHeal{}
 			} else {
 				w.healDHCP(iface, &heal)

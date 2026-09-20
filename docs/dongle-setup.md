@@ -50,7 +50,7 @@ is exactly what the `vohive-mac at` subcommand does.
 ### 2.1 Prerequisites
 
 - [Homebrew](https://brew.sh): `brew install libusb go`
-- The `vohive-mac` binary (`go build` in the project root)
+- The `vohive-mac` binary (`go build -o vohive-mac ./cmd/vohive-mac`)
 - The dongle plugged in, with a SIM inserted
 
 > Only one process can claim the AT interface at a time — if the vohive-mac

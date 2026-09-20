@@ -8,7 +8,7 @@
 // identity. sim_id 0 is the reserved "unknown SIM" row: it holds rows written
 // before any SIM was identified (including everything migrated from the
 // pre-SIM schema), until AdoptUnknown() attributes them.
-package main
+package store
 
 import (
 	"crypto/sha256"
@@ -22,6 +22,8 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"vohive-mac/internal/sim"
 )
 
 // schemaVersion is stored in PRAGMA user_version. 1 introduced per-SIM rows;
@@ -29,8 +31,8 @@ import (
 // metered flag; 4 turned it on by default.
 const schemaVersion = 4
 
-// unknownSIM is the sim_id of the reserved catch-all row.
-const unknownSIM int64 = 0
+// UnknownSIM is the sim_id of the reserved catch-all row.
+const UnknownSIM int64 = 0
 
 // meteredByDefault is the `sims.metered` column default, in Go. A SIM is
 // assumed to be on a paid plan until someone says otherwise: guessing wrong
@@ -46,7 +48,7 @@ CREATE TABLE IF NOT EXISTS sims (
     number     TEXT NOT NULL DEFAULT '',  -- MSISDN (AT+CNUM); often blank
     operator   TEXT NOT NULL DEFAULT '',
     label      TEXT NOT NULL DEFAULT '',  -- user-facing name, defaults to number
-    metered    INTEGER NOT NULL DEFAULT 1, -- mark the ECM link low-data (see metered.go)
+    metered    INTEGER NOT NULL DEFAULT 1, -- mark the ECM link low-data (see the metered pkg)
     first_seen TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     last_seen  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -88,7 +90,8 @@ type Store struct {
 	db *sql.DB
 }
 
-func OpenStore(dataDir string) (*Store, error) {
+// Open opens (and migrates) the SQLite database under dataDir.
+func Open(dataDir string) (*Store, error) {
 	path := filepath.Join(dataDir, "vohive.db")
 	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
@@ -150,7 +153,7 @@ func migrate(db *sql.DB) error {
 		// with a non-NULL default, and a fresh DB must get the same shape.
 		if _, err := db.Exec(fmt.Sprintf(
 			`ALTER TABLE messages ADD COLUMN sim_id INTEGER NOT NULL DEFAULT %d`,
-			unknownSIM)); err != nil {
+			UnknownSIM)); err != nil {
 			return err
 		}
 		// superseded by idx_messages_sim_ts; every query is SIM-scoped now
@@ -168,14 +171,14 @@ func migrate(db *sql.DB) error {
 	}
 	if legacyUsage {
 		if _, err := db.Exec(`INSERT INTO usage (sim_id, day, rx, tx)
-		    SELECT ?, day, rx, tx FROM usage_pre_sim`, unknownSIM); err != nil {
+		    SELECT ?, day, rx, tx FROM usage_pre_sim`, UnknownSIM); err != nil {
 			return err
 		}
 		if _, err := db.Exec(`DROP TABLE usage_pre_sim`); err != nil {
 			return err
 		}
 	}
-	// v2: a generated label carries the whole ICCID (SIMIdentity.defaultLabel)
+	// v2: a generated label carries the whole ICCID (sim.Identity.DefaultLabel)
 	// rather than the last six digits, so an unnamed card can be identified
 	// from the number printed on it. Rewrite the placeholders older builds
 	// stored — only rows whose label still matches a form this app generated;
@@ -186,7 +189,7 @@ func migrate(db *sql.DB) error {
 	    WHERE id != ? AND length(iccid) > 6 AND (
 	        label = '…' || substr(iccid, -6) OR
 	        (operator != '' AND label = operator || ' …' || substr(iccid, -6)))`,
-		unknownSIM); err != nil {
+		UnknownSIM); err != nil {
 		return err
 	}
 
@@ -267,7 +270,7 @@ func (s *Store) importLegacyUsage(jsonPath string) {
 		s.db.Exec(`INSERT INTO usage (sim_id, day, rx, tx) VALUES (?,?,?,?)
 		           ON CONFLICT(sim_id, day) DO UPDATE SET
 		           rx = MAX(rx, excluded.rx), tx = MAX(tx, excluded.tx)`,
-			unknownSIM, d.Day, d.Rx, d.Tx) //nolint:errcheck
+			UnknownSIM, d.Day, d.Rx, d.Tx) //nolint:errcheck
 	}
 	os.Rename(jsonPath, jsonPath+".imported") //nolint:errcheck
 }
@@ -294,13 +297,13 @@ type SIM struct {
 // number can be provisioned onto a SIM later, and a locked card reports none
 // of them — see mergeSIM), as does a label the user never chose. A label the
 // user *did* choose is never touched.
-func (s *Store) EnsureSIM(id SIMIdentity) (int64, error) {
+func (s *Store) EnsureSIM(id sim.Identity) (int64, error) {
 	if id.ICCID == "" {
-		return unknownSIM, fmt.Errorf("SIM has no ICCID")
+		return UnknownSIM, fmt.Errorf("SIM has no ICCID")
 	}
 	merged, label, err := s.mergeSIM(id)
 	if err != nil {
-		return unknownSIM, err
+		return UnknownSIM, err
 	}
 	_, err = s.db.Exec(`INSERT INTO sims (iccid, imsi, number, operator, label)
 	    VALUES (?,?,?,?,?)
@@ -312,7 +315,7 @@ func (s *Store) EnsureSIM(id SIMIdentity) (int64, error) {
 	        last_seen = datetime('now','localtime')`,
 		merged.ICCID, merged.IMSI, merged.Number, merged.Operator, label)
 	if err != nil {
-		return unknownSIM, err
+		return UnknownSIM, err
 	}
 	var rowID int64
 	err = s.db.QueryRow(`SELECT id FROM sims WHERE iccid = ?`, id.ICCID).Scan(&rowID)
@@ -332,20 +335,20 @@ func (s *Store) EnsureSIM(id SIMIdentity) (int64, error) {
 // The label follows the same principle. A name the user typed is theirs and
 // survives; a name this app generated is only ever a rendering of the identity
 // readable at the time, so it tracks the merged identity. Which of the two a
-// stored label is gets decided by its *form* (SIMIdentity.isGeneratedLabel),
+// stored label is gets decided by its *form* (sim.Identity.IsGeneratedLabel),
 // never by comparing it to a single current default — the row it describes has
 // usually already moved past that.
-func (s *Store) mergeSIM(id SIMIdentity) (SIMIdentity, string, error) {
-	stored := SIMIdentity{ICCID: id.ICCID}
+func (s *Store) mergeSIM(id sim.Identity) (sim.Identity, string, error) {
+	stored := sim.Identity{ICCID: id.ICCID}
 	var label string
 	err := s.db.QueryRow(
 		`SELECT imsi, number, operator, label FROM sims WHERE iccid = ?`, id.ICCID).
 		Scan(&stored.IMSI, &stored.Number, &stored.Operator, &label)
 	switch {
 	case err == sql.ErrNoRows: // first sighting: nothing to merge or preserve
-		return id, id.defaultLabel(), nil
+		return id, id.DefaultLabel(), nil
 	case err != nil:
-		return SIMIdentity{}, "", err
+		return sim.Identity{}, "", err
 	}
 
 	merged := id
@@ -358,10 +361,10 @@ func (s *Store) mergeSIM(id SIMIdentity) (SIMIdentity, string, error) {
 	if merged.Operator == "" {
 		merged.Operator = stored.Operator
 	}
-	if !stored.isGeneratedLabel(label) {
+	if !stored.IsGeneratedLabel(label) {
 		return merged, label, nil // the user named this card
 	}
-	return merged, merged.defaultLabel(), nil
+	return merged, merged.DefaultLabel(), nil
 }
 
 func (s *Store) ListSIMs() ([]SIM, error) {
@@ -433,7 +436,7 @@ func (s *Store) Metered(simID int64) (bool, error) {
 // that was in the dongle years ago. Wrong guesses are corrected with
 // ReassignMessages, and the guard is what makes those corrections stick.
 func (s *Store) AdoptUnknown(simID int64) (messages, days int, err error) {
-	if simID == unknownSIM {
+	if simID == UnknownSIM {
 		return 0, 0, nil
 	}
 	var done string
@@ -456,7 +459,7 @@ func (s *Store) AdoptUnknown(simID int64) (messages, days int, err error) {
 	// recomputed or the same message re-listed off the hardware would archive
 	// twice (only reachable with -archive-delete=false, but cheap to prevent).
 	rows, err := tx.Query(`SELECT id, direction, peer, ts, body
-	    FROM messages WHERE sim_id = ?`, unknownSIM)
+	    FROM messages WHERE sim_id = ?`, UnknownSIM)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -495,12 +498,12 @@ func (s *Store) AdoptUnknown(simID int64) (messages, days int, err error) {
 	    SELECT ?, day, rx, tx FROM usage WHERE sim_id = ?
 	    ON CONFLICT(sim_id, day) DO UPDATE SET
 	        rx = usage.rx + excluded.rx, tx = usage.tx + excluded.tx`,
-		simID, unknownSIM)
+		simID, UnknownSIM)
 	if err != nil {
 		return 0, 0, err
 	}
 	nDays, _ := res.RowsAffected()
-	if _, err := tx.Exec(`DELETE FROM usage WHERE sim_id = ?`, unknownSIM); err != nil {
+	if _, err := tx.Exec(`DELETE FROM usage WHERE sim_id = ?`, UnknownSIM); err != nil {
 		return 0, 0, err
 	}
 	if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)`,
@@ -515,7 +518,7 @@ func (s *Store) AdoptUnknown(simID int64) (messages, days int, err error) {
 
 // ReassignMessages moves messages to another SIM — the manual correction for
 // an archive that turned out to hold more than one card's history. Moving to
-// unknownSIM is legitimate: it means "a card this app has never seen".
+// UnknownSIM is legitimate: it means "a card this app has never seen".
 //
 // Inbound dedup hashes are SIM-scoped, so they are recomputed. A message whose
 // new hash already exists on the target SIM is skipped rather than moved: the
@@ -582,6 +585,21 @@ func (s *Store) ReassignMessages(simID int64, ids []int64) (moved, skipped int, 
 
 // ---------------------------------------------------------------- usage
 
+// DayUsage is one day's byte totals for one SIM — the unit the tracker
+// accumulates in and the unit a `usage` row holds.
+type DayUsage struct {
+	Day string `json:"day"`
+	Rx  uint64 `json:"rx"`
+	Tx  uint64 `json:"tx"`
+}
+
+// MonthUsage totals a calendar month ("2006-01").
+type MonthUsage struct {
+	Month string `json:"month"`
+	Rx    uint64 `json:"rx"`
+	Tx    uint64 `json:"tx"`
+}
+
 // SetDayUsage stores the absolute totals for one day on one SIM (write-through
 // from the tracker's in-memory accumulation).
 func (s *Store) SetDayUsage(simID int64, d DayUsage) error {
@@ -611,6 +629,21 @@ func (s *Store) MonthUsage(simID int64, month, excludeDay string) (rx, tx uint64
 	return rx, tx, err
 }
 
+// MonthTotal totals the calendar month that `today` falls in: the stored rows
+// for the other days plus the given today, whose in-memory copy can be ahead
+// of its write-through row. On error it still returns today's own figures, so
+// a caller can log and carry on showing something truthful.
+func (s *Store) MonthTotal(simID int64, today DayUsage) (MonthUsage, error) {
+	m := MonthUsage{Month: today.Day[:7], Rx: today.Rx, Tx: today.Tx}
+	rx, tx, err := s.MonthUsage(simID, m.Month, today.Day)
+	if err != nil {
+		return m, err
+	}
+	m.Rx += rx
+	m.Tx += tx
+	return m, nil
+}
+
 func (s *Store) RecentDays(simID int64, n int) ([]DayUsage, error) {
 	rows, err := s.db.Query(
 		`SELECT day, rx, tx FROM usage WHERE sim_id = ? ORDER BY day DESC LIMIT ?`,
@@ -632,7 +665,8 @@ func (s *Store) RecentDays(simID int64, n int) ([]DayUsage, error) {
 
 // ---------------------------------------------------------------- messages
 
-type StoredMessage struct {
+// Message is an archived SMS as stored.
+type Message struct {
 	ID        int64  `json:"id"`
 	SimID     int64  `json:"sim_id"`
 	Direction string `json:"direction"`
@@ -668,7 +702,7 @@ func (s *Store) RecordOutbound(simID int64, to, body string) error {
 }
 
 // ListMessages returns the newest messages for one SIM.
-func (s *Store) ListMessages(simID int64, limit int) ([]StoredMessage, error) {
+func (s *Store) ListMessages(simID int64, limit int) ([]Message, error) {
 	rows, err := s.db.Query(`SELECT id, sim_id, direction, peer, body, ts
 	    FROM messages WHERE sim_id = ? ORDER BY ts DESC, id DESC LIMIT ?`,
 		simID, limit)
@@ -676,9 +710,9 @@ func (s *Store) ListMessages(simID int64, limit int) ([]StoredMessage, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []StoredMessage
+	var out []Message
 	for rows.Next() {
-		var m StoredMessage
+		var m Message
 		if err := rows.Scan(&m.ID, &m.SimID, &m.Direction, &m.Peer, &m.Body,
 			&m.Timestamp); err != nil {
 			return nil, err

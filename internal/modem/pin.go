@@ -11,7 +11,7 @@
 //
 // Codes never reach a log line or an API response: the commands that carry
 // them go through Modem.cmdEchoLocked with a redacted echo.
-package main
+package modem
 
 import (
 	"fmt"
@@ -25,14 +25,14 @@ import (
 // reporting the state it had a moment ago would look like the unlock failed.
 const pinSettle = 5 * time.Second
 
-// inputError marks a refusal decided here, before anything reached the card —
+// InputError marks a refusal decided here, before anything reached the card —
 // a malformed code, or an operation the current lock state does not allow. The
 // API answers 400 for these and 502 only for what the modem actually said.
-type inputError struct{ msg string }
+type InputError struct{ msg string }
 
-func (e inputError) Error() string { return e.msg }
+func (e InputError) Error() string { return e.msg }
 
-func badInput(format string, a ...any) error { return inputError{fmt.Sprintf(format, a...)} }
+func badInput(format string, a ...any) error { return InputError{fmt.Sprintf(format, a...)} }
 
 // SIMLock is the PIN state of the card in the dongle.
 type SIMLock struct {

@@ -38,7 +38,7 @@ renamed).
 ## Build & run
 
 ```sh
-go build -o vohive-mac .
+go build -o vohive-mac ./cmd/vohive-mac
 ./vohive-mac                # web console on http://127.0.0.1:7676
 ./vohive-mac -addr :7676    # expose on the LAN (no auth — beware)
 ```
@@ -116,21 +116,29 @@ the dongle keeps carrying traffic after the server stops.
 ## Layout
 
 ```
-main.go      entrypoint + `at` CLI subcommand
-modem.go     raw-USB AT channel, SMS send (UCS2), storage access, status queries
-pin.go       SIM PIN: unlock/PUK-unblock, power-on lock toggle, PIN change
-pdu.go       SMS-DELIVER PDU decoder
-ingest.go    SMS archiver: modem/SIM storage → SQLite (delete after archive)
-recovery.go  ECM link watchdog: USB-resets the dongle when the data link
-             stays down after sleep/wake (firmware never re-asserts it)
-db.go        SQLite store (messages + usage tables)
-metered.go   low data mode: keeps the ECM link's expensive/constrained flags
-             in step with the current SIM's setting (needs root)
-traffic.go   interface-counter sampler, write-through daily usage persistence
-server.go    HTTP API + embedded static UI
-static/      web console (self-contained HTML/CSS/JS)
-docs/        dongle setup manual (USB mode switch, troubleshooting, uninstall)
+cmd/vohive-mac/    entrypoint: wiring + the `at` CLI subcommand
+internal/
+  pdu/             SMS-DELIVER PDU decoder (pure functions, no I/O)
+  sim/             SIM identity (ICCID/IMSI/number/operator) and its label rules
+  modem/           raw-USB AT channel: SMS send (UCS2), storage access, status,
+                   and SIM PIN (unlock/PUK-unblock, lock toggle, PIN change).
+                   The only package that touches USB.
+  store/           SQLite: sims, messages and usage tables, plus migrations
+  sims/            SIM registry: which card is in the dongle right now
+  netif/           the ECM network interface: link state, low-data flags, and
+                   the byte-counter sampler behind data-usage tracking
+  metered/         low data mode: keeps the link's expensive/constrained flags
+                   in step with the current SIM's setting (needs root)
+  archive/         SMS archiver: modem/SIM storage → SQLite (delete after)
+  recovery/        ECM link watchdog: USB-resets the dongle when the link stays
+                   down after sleep/wake, reboots it when DHCP stops answering
+  server/          HTTP API + embedded web console (static/)
+docs/              dongle setup manual (USB mode switch, troubleshooting)
 ```
+
+The dependency graph runs one way: `pdu` and `sim` depend on nothing, `store`
+depends only on `sim` (so its tests need no dongle and no libusb), and
+everything above them is wired together in `cmd/vohive-mac`.
 
 ## Limitations / notes
 

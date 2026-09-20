@@ -7,7 +7,7 @@
 // present, except that incomplete groups older than partGracePeriod are
 // archived as-is with a "[x/y parts]" marker so stragglers can't pin slots
 // forever.
-package main
+package archive
 
 import (
 	"fmt"
@@ -16,16 +16,22 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"vohive-mac/internal/modem"
+	"vohive-mac/internal/pdu"
+	"vohive-mac/internal/sims"
+	"vohive-mac/internal/store"
 )
 
 const partGracePeriod = 24 * time.Hour
 
 var smsStorages = []string{"SM", "ME"}
 
+// Archiver drains the modem's hardware message storages into the store.
 type Archiver struct {
-	modem       *Modem
-	store       *Store
-	sims        *SIMRegistry
+	modem       *modem.Modem
+	store       *store.Store
+	sims        *sims.Registry
 	deleteAfter bool
 
 	mu       sync.Mutex
@@ -33,8 +39,9 @@ type Archiver struct {
 	stop     chan struct{}
 }
 
-func NewArchiver(m *Modem, s *Store, sims *SIMRegistry, deleteAfter bool) *Archiver {
-	return &Archiver{modem: m, store: s, sims: sims, deleteAfter: deleteAfter,
+// New returns an archiver; call Start to drain on a timer.
+func New(m *modem.Modem, s *store.Store, reg *sims.Registry, deleteAfter bool) *Archiver {
+	return &Archiver{modem: m, store: s, sims: reg, deleteAfter: deleteAfter,
 		stop: make(chan struct{})}
 }
 
@@ -109,16 +116,16 @@ func (a *Archiver) syncStorage(storage string) error {
 		sender string
 		ref    int
 	}
-	groups := map[key]map[int]pduRecord{}
+	groups := map[key]map[int]pdu.Record{}
 	for _, m := range msgs {
-		if m.concatRef >= 0 {
-			k := key{m.sender, m.concatRef}
+		if m.ConcatRef >= 0 {
+			k := key{m.Sender, m.ConcatRef}
 			if groups[k] == nil {
-				groups[k] = map[int]pduRecord{}
+				groups[k] = map[int]pdu.Record{}
 			}
-			groups[k][m.concatSeq] = m
+			groups[k][m.ConcatSeq] = m
 		} else {
-			archive(m.sender, m.timestamp, m.text, m.index)
+			archive(m.Sender, m.Timestamp, m.Text, m.Index)
 		}
 	}
 
@@ -128,23 +135,23 @@ func (a *Archiver) syncStorage(storage string) error {
 		var indexes []int
 		for s, p := range parts {
 			seqs = append(seqs, s)
-			total = p.concatTot
-			indexes = append(indexes, p.index)
+			total = p.ConcatTot
+			indexes = append(indexes, p.Index)
 		}
 		sort.Ints(seqs)
 		first := parts[seqs[0]]
 		complete := len(parts) >= total
-		if !complete && !olderThan(first.timestamp, partGracePeriod) {
+		if !complete && !olderThan(first.Timestamp, partGracePeriod) {
 			continue // wait for the remaining parts
 		}
 		var sb strings.Builder
 		for _, s := range seqs {
-			sb.WriteString(parts[s].text)
+			sb.WriteString(parts[s].Text)
 		}
 		if !complete {
 			fmt.Fprintf(&sb, " …[%d/%d parts]", len(parts), total)
 		}
-		archive(first.sender, first.timestamp, sb.String(), indexes...)
+		archive(first.Sender, first.Timestamp, sb.String(), indexes...)
 	}
 
 	if a.deleteAfter {

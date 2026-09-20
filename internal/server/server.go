@@ -1,4 +1,5 @@
-package main
+// Package server is the HTTP API and the embedded web console.
+package server
 
 import (
 	"embed"
@@ -12,28 +13,37 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"vohive-mac/internal/archive"
+	"vohive-mac/internal/metered"
+	"vohive-mac/internal/modem"
+	"vohive-mac/internal/netif"
+	"vohive-mac/internal/sims"
+	"vohive-mac/internal/store"
 )
 
 //go:embed static
 var staticFS embed.FS
 
+// Server wires the API handlers to the components behind them.
 type Server struct {
-	modem    *Modem
-	traffic  *TrafficTracker
-	store    *Store
-	archiver *Archiver
-	sims     *SIMRegistry
-	metered  *MeteredController
+	modem    *modem.Modem
+	traffic  *netif.Tracker
+	store    *store.Store
+	archiver *archive.Archiver
+	sims     *sims.Registry
+	metered  *metered.Controller
 
 	statusMu   sync.Mutex
-	statusVal  Status
+	statusVal  modem.Status
 	statusTime time.Time
 }
 
-func NewServer(m *Modem, t *TrafficTracker, s *Store, a *Archiver,
-	sims *SIMRegistry, metered *MeteredController) *Server {
-	return &Server{modem: m, traffic: t, store: s, archiver: a, sims: sims,
-		metered: metered}
+// New wires up the API. Call Handler for something to serve.
+func New(m *modem.Modem, t *netif.Tracker, s *store.Store, a *archive.Archiver,
+	reg *sims.Registry, met *metered.Controller) *Server {
+	return &Server{modem: m, traffic: t, store: s, archiver: a, sims: reg,
+		metered: met}
 }
 
 // simParam resolves the ?sim=<id> query parameter, defaulting to the SIM
@@ -63,7 +73,7 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 // writeModemErr splits a refusal this process made from one the modem made:
 // bad input is the caller's fault (400), anything else is the dongle's (502).
 func writeModemErr(w http.ResponseWriter, err error) {
-	var bad inputError
+	var bad modem.InputError
 	if errors.As(err, &bad) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -73,7 +83,7 @@ func writeModemErr(w http.ResponseWriter, err error) {
 
 // cachedStatus throttles AT-port polling: concurrent/frequent UI refreshes
 // reuse a snapshot at most 5 s old instead of hammering the modem.
-func (s *Server) cachedStatus() Status {
+func (s *Server) cachedStatus() modem.Status {
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
 	if time.Since(s.statusTime) < 5*time.Second {
@@ -93,16 +103,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSims(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		sims, err := s.store.ListSIMs()
+		cards, err := s.store.ListSIMs()
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		if sims == nil {
-			sims = []SIM{}
+		if cards == nil {
+			cards = []store.SIM{}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"sims":    sims,
+			"sims":    cards,
 			"current": s.sims.CurrentID(),
 		})
 	case http.MethodPost:
@@ -144,25 +154,29 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snap)
 }
 
-func (s *Server) storedTraffic(simID int64) (TrafficSnapshot, error) {
+func (s *Server) storedTraffic(simID int64) (netif.Snapshot, error) {
 	day := time.Now().Format("2006-01-02")
 	today, err := s.store.GetDayUsage(simID, day)
 	if err != nil {
-		return TrafficSnapshot{}, err
+		return netif.Snapshot{}, err
 	}
 	days, err := s.store.RecentDays(simID, 14)
 	if err != nil {
-		return TrafficSnapshot{}, err
+		return netif.Snapshot{}, err
 	}
 	if len(days) == 0 || days[0].Day != day {
-		days = append([]DayUsage{today}, days...)
+		days = append([]store.DayUsage{today}, days...)
 	}
-	return TrafficSnapshot{
+	month, err := s.store.MonthTotal(simID, today)
+	if err != nil {
+		return netif.Snapshot{}, err
+	}
+	return netif.Snapshot{
 		SimID:   simID,
 		Today:   today,
-		Month:   monthUsage(s.store, simID, today),
+		Month:   month,
 		Days:    days,
-		History: []RatePoint{},
+		History: []netif.RatePoint{},
 	}, nil
 }
 
@@ -182,7 +196,7 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if msgs == nil {
-		msgs = []StoredMessage{}
+		msgs = []store.Message{}
 	}
 	writeJSON(w, http.StatusOK, msgs)
 }
@@ -231,7 +245,7 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 // for any other SIM stores the preference for when that card goes back in.
 //
 // Unlike /api/data this changes nothing on the modem and costs no AT traffic:
-// it is a flag on the macOS interface, applied by MeteredController.
+// it is a flag on the macOS interface, applied by metered.Controller.
 func (s *Server) handleMetered(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -332,7 +346,7 @@ func (s *Server) handleSIMUnlock(w http.ResponseWriter, r *http.Request) {
 	}
 	lock, err := s.modem.EnterPIN(req.Code, req.NewPIN)
 	if err != nil {
-		var bad inputError
+		var bad modem.InputError
 		code := http.StatusBadGateway
 		if errors.As(err, &bad) {
 			code = http.StatusBadRequest
