@@ -92,7 +92,7 @@ CREATE TABLE sims (
     last_seen  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 INSERT INTO sims (id, iccid, label) VALUES (0, '', 'unknown SIM');
-INSERT INTO sims (iccid, label) VALUES ('8986012680104579043', 'travel sim');
+INSERT INTO sims (iccid, label) VALUES ('8986000000000000010', 'travel sim');
 PRAGMA user_version = 2;
 `
 
