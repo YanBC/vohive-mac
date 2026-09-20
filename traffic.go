@@ -269,18 +269,10 @@ func monthUsage(store *Store, simID int64, today DayUsage) MonthUsage {
 	return m
 }
 
-// LinkState returns the resolved interface name and whether its link is up,
-// as of the last sample. Used by the ECM link watchdog.
-func (t *TrafficTracker) LinkState() (iface string, up bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.iface, t.up
-}
-
-// MeteredLink returns the ECM interface and its last parsed state. Reusing
-// the sampler's ifconfig output keeps the metered reconciler from spawning one
-// of its own every few seconds.
-func (t *TrafficTracker) MeteredLink() (iface string, link linkState) {
+// Link returns the ECM interface and its last parsed state. Reusing the
+// sampler's ifconfig output keeps the metered reconciler and the watchdog
+// from spawning one of their own every few seconds.
+func (t *TrafficTracker) Link() (iface string, link linkState) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.iface, t.link

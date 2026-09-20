@@ -21,6 +21,10 @@
 // the dongle off the bus entirely (libusb reset timeout, device gone until
 // replugged). A sleep gap is detected as a wall-clock jump between ticks;
 // it clears the timer and imposes wakeSettle of quiet time first.
+//
+// There is a second failure mode with the opposite signature — the link up
+// and healthy, carrying IPv6, but with no IPv4 address at all — which the
+// trigger above deliberately does not catch and healDHCP handles instead.
 package main
 
 import (
@@ -34,6 +38,18 @@ const (
 	linkDownThreshold = 10 * time.Second
 	resetCooldown     = 60 * time.Second
 	wakeSettle        = 15 * time.Second
+
+	// The DHCP failure below is a much slower business than a wedged link:
+	// the threshold has to clear a normal lease acquisition (observed at ~9 s
+	// from enumeration on this dongle) with room to spare, and the remedy
+	// costs a full modem reboot and every connection on the link, so it is
+	// rationed far more tightly than a USB reset.
+	dhcpFailThreshold = 45 * time.Second
+	dhcpRebootCd      = 10 * time.Minute
+	// dhcpRebootLimit stops a dongle whose DHCP server is broken for some
+	// other reason from being rebooted every cooldown forever. Only an
+	// interface that actually comes back with an IPv4 address clears it.
+	dhcpRebootLimit = 3
 )
 
 type Watchdog struct {
@@ -57,6 +73,7 @@ func (w *Watchdog) run() {
 	var lastReset time.Time
 	var settleUntil time.Time
 	var verifyAt time.Time
+	var heal dhcpHeal
 	pinNoted := false // "SIM is locked" is logged on entry to that state, not every tick
 	lastTick := time.Now()
 	for {
@@ -90,11 +107,27 @@ func (w *Watchdog) run() {
 			}
 		}
 
-		iface, up := w.traffic.LinkState()
-		if up || iface == "" {
-			downSince = time.Time{}
+		iface, link := w.traffic.Link()
+		if iface == "" {
+			// Dongle gone. heal keeps its counters: a replug is not evidence
+			// that anything was fixed, and the reboots this watchdog issues
+			// make the interface vanish too — zeroing here would reset the
+			// limit on every attempt and loop forever.
+			downSince, heal.noV4Since = time.Time{}, time.Time{}
 			continue
 		}
+		if link.up {
+			// The link being up is not the same as it carrying traffic: the
+			// ECM side can be perfectly alive over IPv6 with no IPv4 lease.
+			downSince = time.Time{}
+			if link.routableV4 {
+				heal = dhcpHeal{}
+			} else {
+				w.healDHCP(iface, &heal)
+			}
+			continue
+		}
+		heal.noV4Since = time.Time{}
 		// Link down because cellular data is deliberately disabled, or
 		// because a commanded modem reboot (data toggle) is still settling,
 		// is the expected state, not a wedged ECM — never reset for it.
@@ -149,4 +182,82 @@ func (w *Watchdog) run() {
 		downSince = time.Time{}
 		verifyAt = lastReset.Add(30 * time.Second)
 	}
+}
+
+// dhcpHeal is the state of the second failure mode: the ECM link is up, but
+// macOS has no usable IPv4 address on it.
+type dhcpHeal struct {
+	noV4Since  time.Time
+	lastReboot time.Time
+	reboots    int
+	gaveUp     bool // the limit was hit and said so; say it once
+}
+
+// healDHCP recovers an ECM link that is up but carries no IPv4.
+//
+// The dongle runs its own DHCP server on the USB LAN (192.168.225.0/24) and
+// hands out 12 h leases keyed on the host's MAC address. macOS 27 mints a new
+// random locally-administered MAC for the ECM interface on *every*
+// enumeration — a replug, a lid-close USB suspend, a USB reset from the
+// watchdog above, a modem reboot — so each one arrives at that server as a
+// brand-new client and burns another lease. Once the pool is used up the
+// server stops answering, macOS self-assigns a 169.254 address, and there is
+// no IPv4 route at all.
+//
+// This is easy to miss, because nothing looks broken: the link stays
+// "status: active", the modem stays registered on LTE with a WAN address, and
+// IPv6 keeps working throughout (SLAAC needs no server to answer), so the
+// link-down watchdog above never fires. What the user sees is "no internet".
+//
+// The remedy is a modem reboot, which clears the lease table. Renewing from
+// this side is not an alternative: macOS is already retrying on its own and
+// there is nothing to retry against.
+func (w *Watchdog) healDHCP(iface string, h *dhcpHeal) {
+	// A link that is deliberately off, or one whose reboot is still settling,
+	// has no business having a lease yet.
+	if w.modem.DataOff() || w.modem.Rebooting() {
+		h.noV4Since = time.Time{}
+		return
+	}
+	if h.noV4Since.IsZero() {
+		h.noV4Since = time.Now()
+		return
+	}
+	if time.Since(h.noV4Since) < dhcpFailThreshold || h.gaveUp {
+		return
+	}
+	if !h.lastReboot.IsZero() && time.Since(h.lastReboot) < dhcpRebootCd {
+		return
+	}
+	if h.reboots >= dhcpRebootLimit {
+		log.Printf("watchdog: %s still has no IPv4 after %d modem reboots — leaving it alone; "+
+			"replug the dongle, or check whether the SIM's data plan is still active", iface, h.reboots)
+		h.gaveUp = true
+		return
+	}
+	// Same aliveness and don't-touch-it checks the USB reset path makes: the
+	// data-enabled query doubles as the probe that the dongle is still there.
+	enabled, _, err := w.modem.DataEnabled()
+	if err != nil {
+		return
+	}
+	if !enabled {
+		h.noV4Since = time.Time{}
+		return
+	}
+	// A card waiting for its PIN carries no data by design, and a reboot only
+	// brings the same locked card back. Asked, not read from a cache, for the
+	// reason given on the reset path.
+	if ready, _, err := w.modem.PINReady(); err == nil && !ready {
+		h.noV4Since = time.Time{}
+		return
+	}
+	log.Printf("watchdog: %s link up but no IPv4 for %s (dhcp unanswered) — rebooting the modem",
+		iface, time.Since(h.noV4Since).Round(time.Second))
+	if err := w.modem.Reboot(); err != nil {
+		log.Printf("watchdog: modem reboot: %v", err)
+	}
+	h.lastReboot = time.Now()
+	h.reboots++
+	h.noV4Since = time.Time{}
 }

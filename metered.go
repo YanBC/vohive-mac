@@ -45,6 +45,7 @@ const (
 type linkState struct {
 	exists      bool // the interface is there at all
 	up          bool // and its link is actually up ("status: active")
+	routableV4  bool // it holds an IPv4 address worth routing over
 	expensive   bool // IFEF_EXPENSIVE
 	constrained bool // IFXF_CONSTRAINED
 }
@@ -85,9 +86,33 @@ func parseLinkState(out string) linkState {
 	return linkState{
 		exists:      true,
 		up:          strings.Contains(out, "status: active"),
+		routableV4:  hasRoutableV4(out),
 		expensive:   expensiveRe.MatchString(out),
 		constrained: constrainedRe.MatchString(out),
 	}
+}
+
+// hasRoutableV4 reports whether the interface holds an IPv4 address that is
+// worth routing over. A 169.254/16 address is what macOS self-assigns when
+// its DHCP client found no server, so it counts as no IPv4 at all — the same
+// as an interface that has not been configured yet. The distinction matters
+// because the ECM link can be "status: active" and carrying IPv6 (SLAAC needs
+// no server to answer) while every IPv4 route is missing; see healDHCP.
+//
+// Matched on whole fields rather than by substring: "inet6" must not match,
+// and an interface can hold a real lease and a stale link-local address at
+// once, in which case the real one wins.
+func hasRoutableV4(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "inet" {
+			continue
+		}
+		if !strings.HasPrefix(f[1], "169.254.") {
+			return true
+		}
+	}
+	return false
 }
 
 // setLinkMetered sets or clears both flags on the interface. Root only.
@@ -222,7 +247,7 @@ func (c *MeteredController) reconcileLocked() {
 		c.say("store", "metered: read setting for sim %d: %v", simID, err)
 		return
 	}
-	iface, link := c.traffic.MeteredLink()
+	iface, link := c.traffic.Link()
 	if iface == "" || !link.exists {
 		return // no dongle to mark; nothing to report either
 	}
@@ -288,7 +313,7 @@ func (c *MeteredController) State(simID int64) (MeteredState, error) {
 	if simID != c.sims.CurrentID() {
 		return st, nil
 	}
-	iface, link := c.traffic.MeteredLink()
+	iface, link := c.traffic.Link()
 	st.Iface, st.Present, st.Up, st.Applied = iface, link.exists, link.up, link.marked()
 	return st, nil
 }

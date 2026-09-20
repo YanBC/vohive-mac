@@ -48,7 +48,7 @@ func TestParseLinkState(t *testing.T) {
 		out  string
 		want linkState
 	}{
-		{"unmarked", realIfconfig, linkState{exists: true, up: true}},
+		{"unmarked", realIfconfig, linkState{exists: true, up: true, routableV4: true}},
 		{"marked", marked, linkState{exists: true, up: true, expensive: true, constrained: true}},
 		{"ultra constrained is not constrained", ultra, linkState{exists: true}},
 		{"flag last in list", trailing, linkState{exists: true, up: true, expensive: true, constrained: true}},
@@ -275,5 +275,59 @@ func TestMigrateKeepsDeliberateOptOut(t *testing.T) {
 	if on, err := s.Metered(unlimited); err != nil || on {
 		t.Errorf("Metered(%d) = %v, %v after restart; the opt-out was undone",
 			unlimited, on, err)
+	}
+}
+
+// apipaIfconfig is the dongle as macOS 27 printed it while the failure this
+// parse exists for was happening: the ECM link is up and carrying IPv6
+// perfectly well, and the only IPv4 address is the 169.254 one macOS
+// self-assigns after its DHCP client gives up on finding a server.
+const apipaIfconfig = `en6: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500 constrained
+	options=6464<VLAN_MTU,TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>
+	ether fe:87:cb:a7:d3:c0
+	inet6 fe80::ce6:611f:8a3:33c3%en6 prefixlen 64 secured scopeid 0x1a 
+	inet6 2408:8456:3211:585c:892:bb58:3ce0:25db prefixlen 64 autoconf secured 
+	inet 169.254.182.86 netmask 0xffff0000 broadcast 169.254.255.255
+	nd6 options=201<PERFORMNUD,DAD>
+	media: autoselect (100baseTX <full-duplex>)
+	status: active
+`
+
+// TestHasRoutableV4 covers the ways "does this link have IPv4" can be read
+// wrong: counting the self-assigned 169.254 address as a real one (the whole
+// failure would then be invisible), matching an inet6 line as if it were
+// IPv4 (this link always has several, and they work), and discarding a real
+// lease because a stale link-local address is still sitting next to it.
+func TestHasRoutableV4(t *testing.T) {
+	both := apipaIfconfig + "\tinet 192.168.225.22 netmask 0xffffff00 broadcast 192.168.225.255\n"
+	v6only := `en6: flags=8863<UP,BROADCAST> mtu 1500
+	inet6 fe80::ce6:611f:8a3:33c3%en6 prefixlen 64 secured scopeid 0x1a 
+	status: active
+`
+	for _, tc := range []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"real lease", realIfconfig, true},
+		{"self-assigned only", apipaIfconfig, false},
+		{"ipv6 only", v6only, false},
+		{"no addresses at all", "en6: flags=8863<UP> mtu 1500\n\tstatus: active\n", false},
+		{"real lease alongside a stale link-local", both, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasRoutableV4(tc.out); got != tc.want {
+				t.Errorf("hasRoutableV4 = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseLinkStateAPIPA is the state the watchdog keys on: up, so the
+// link-down reset path leaves it alone, and no IPv4, so healDHCP takes it.
+func TestParseLinkStateAPIPA(t *testing.T) {
+	got := parseLinkState(apipaIfconfig)
+	if !got.up || got.routableV4 {
+		t.Errorf("parseLinkState = %+v, want up with no routable IPv4", got)
 	}
 }

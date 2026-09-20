@@ -317,13 +317,34 @@ func (m *Modem) SetDataEnabled(enabled bool) error {
 		return err
 	}
 	m.dataOff.Store(!enabled)
+	return m.rebootLocked()
+}
+
+// Reboot restarts the modem without changing any setting. The watchdog uses
+// it to clear the dongle's DHCP lease table, which is the only way to get an
+// IPv4 lease back once that table has filled up (see healDHCP).
+func (m *Modem) Reboot() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rebootLocked()
+}
+
+// rebootLocked issues the reboot and opens the settling window every other
+// component reads through Rebooting. Caller holds mu.
+func (m *Modem) rebootLocked() error {
 	if _, err := m.cmdLocked("AT+CFUN=1,1", 10*time.Second); err != nil {
 		return err
 	}
-	m.rebootUntil.Store(time.Now().Add(45 * time.Second).Unix())
+	m.rebootUntil.Store(time.Now().Add(rebootSettle).Unix())
 	m.disconnectLocked() // the device is about to fall off the bus
 	return nil
 }
+
+// rebootSettle is how long a commanded reboot is expected to take: the dongle
+// drops off the bus, re-enumerates, and macOS re-runs DHCP on the new
+// interface. Generous on purpose — the whole point of the window is that
+// nothing "recovers" a link that is merely restarting.
+const rebootSettle = 45 * time.Second
 
 // Rebooting reports whether a deliberate modem reboot is still settling.
 // The ECM watchdog must not "recover" the expected link-down of a reboot.
