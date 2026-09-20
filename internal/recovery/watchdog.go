@@ -32,8 +32,8 @@ import (
 	"strings"
 	"time"
 
-	"vohive-mac/internal/modem"
-	"vohive-mac/internal/netif"
+	"github.com/YanBC/vohive-mac/internal/modem"
+	"github.com/YanBC/vohive-mac/internal/netif"
 )
 
 const (

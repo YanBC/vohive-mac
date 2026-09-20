@@ -17,14 +17,14 @@ import (
 	"syscall"
 	"time"
 
-	"vohive-mac/internal/archive"
-	"vohive-mac/internal/metered"
-	"vohive-mac/internal/modem"
-	"vohive-mac/internal/netif"
-	"vohive-mac/internal/recovery"
-	"vohive-mac/internal/server"
-	"vohive-mac/internal/sims"
-	"vohive-mac/internal/store"
+	"github.com/YanBC/vohive-mac/internal/archive"
+	"github.com/YanBC/vohive-mac/internal/metered"
+	"github.com/YanBC/vohive-mac/internal/modem"
+	"github.com/YanBC/vohive-mac/internal/netif"
+	"github.com/YanBC/vohive-mac/internal/recovery"
+	"github.com/YanBC/vohive-mac/internal/server"
+	"github.com/YanBC/vohive-mac/internal/sims"
+	"github.com/YanBC/vohive-mac/internal/store"
 )
 
 // runATCLI implements `vohive-mac at 'AT+CSQ' ...` — an ad-hoc AT command

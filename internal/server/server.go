@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"vohive-mac/internal/archive"
-	"vohive-mac/internal/metered"
-	"vohive-mac/internal/modem"
-	"vohive-mac/internal/netif"
-	"vohive-mac/internal/sims"
-	"vohive-mac/internal/store"
+	"github.com/YanBC/vohive-mac/internal/archive"
+	"github.com/YanBC/vohive-mac/internal/metered"
+	"github.com/YanBC/vohive-mac/internal/modem"
+	"github.com/YanBC/vohive-mac/internal/netif"
+	"github.com/YanBC/vohive-mac/internal/sims"
+	"github.com/YanBC/vohive-mac/internal/store"
 )
 
 //go:embed static

@@ -17,10 +17,10 @@ import (
 	"sync"
 	"time"
 
-	"vohive-mac/internal/modem"
-	"vohive-mac/internal/pdu"
-	"vohive-mac/internal/sims"
-	"vohive-mac/internal/store"
+	"github.com/YanBC/vohive-mac/internal/modem"
+	"github.com/YanBC/vohive-mac/internal/pdu"
+	"github.com/YanBC/vohive-mac/internal/sims"
+	"github.com/YanBC/vohive-mac/internal/store"
 )
 
 const partGracePeriod = 24 * time.Hour

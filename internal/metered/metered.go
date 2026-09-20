@@ -29,8 +29,8 @@ import (
 	"sync"
 	"time"
 
-	"vohive-mac/internal/netif"
-	"vohive-mac/internal/store"
+	"github.com/YanBC/vohive-mac/internal/netif"
+	"github.com/YanBC/vohive-mac/internal/store"
 )
 
 const reconcileInterval = 5 * time.Second

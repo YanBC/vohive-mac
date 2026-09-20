@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vohive-mac/internal/sim"
+	"github.com/YanBC/vohive-mac/internal/sim"
 )
 
 // simsSchemaV2 is the `sims` table as v2 wrote it — no metered column.

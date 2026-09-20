@@ -20,8 +20,8 @@ import (
 
 	"github.com/google/gousb"
 
-	"vohive-mac/internal/pdu"
-	"vohive-mac/internal/sim"
+	"github.com/YanBC/vohive-mac/internal/pdu"
+	"github.com/YanBC/vohive-mac/internal/sim"
 )
 
 var (

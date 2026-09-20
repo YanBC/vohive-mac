@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"vohive-mac/internal/modem"
-	"vohive-mac/internal/sim"
-	"vohive-mac/internal/store"
+	"github.com/YanBC/vohive-mac/internal/modem"
+	"github.com/YanBC/vohive-mac/internal/sim"
+	"github.com/YanBC/vohive-mac/internal/store"
 )
 
 const pollInterval = 30 * time.Second

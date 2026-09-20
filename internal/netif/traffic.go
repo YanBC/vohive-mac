@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"vohive-mac/internal/store"
+	"github.com/YanBC/vohive-mac/internal/store"
 )
 
 const (

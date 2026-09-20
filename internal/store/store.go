@@ -23,7 +23,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"vohive-mac/internal/sim"
+	"github.com/YanBC/vohive-mac/internal/sim"
 )
 
 // schemaVersion is stored in PRAGMA user_version. 1 introduced per-SIM rows;

@@ -1,4 +1,4 @@
-module vohive-mac
+module github.com/YanBC/vohive-mac
 
 go 1.24.4
 

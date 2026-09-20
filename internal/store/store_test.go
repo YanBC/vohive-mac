@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vohive-mac/internal/sim"
+	"github.com/YanBC/vohive-mac/internal/sim"
 )
 
 // legacySchema is the pre-SIM schema (schemaVersion 0), reproduced verbatim so
