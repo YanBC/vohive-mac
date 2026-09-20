@@ -151,3 +151,17 @@ everything above them is wired together in `cmd/vohive-mac`.
   at the same time.
 - Low data mode needs the server to run as root, and is advisory: macOS and
   well-behaved apps honour the flags, nothing enforces them.
+
+## License
+
+[MIT](LICENSE).
+
+This project links **libusb** (LGPL-2.1) dynamically, through
+[gousb](https://github.com/google/gousb) (Apache-2.0); SQLite access is via
+[go-sqlite3](https://github.com/mattn/go-sqlite3) (MIT). Dynamic linking is
+what keeps libusb's terms off your own code — a build that statically links it
+would have to offer relinking, so keep `brew install libusb` as the way it is
+provided.
+
+vohive-mac is an independent implementation, not a port: [VoHive](https://github.com/iniwex5/vohive)
+publishes no license, so no code was taken from it.

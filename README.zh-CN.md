@@ -139,3 +139,16 @@ docs/              上网卡安装手册（USB 模式切换、故障排查）
 - AT 接口是独占的：Web 服务和 `vohive-mac at` 不能同时运行。
 - 低数据模式需要服务以 root 运行，而且只是建议性的：macOS 和行为良好的 App 会
   遵守这两个标志位，但没有任何东西会强制执行。
+
+## 许可证
+
+[MIT](LICENSE)。
+
+本项目通过 [gousb](https://github.com/google/gousb)（Apache-2.0）**动态链接**
+**libusb**（LGPL-2.1）；SQLite 访问使用
+[go-sqlite3](https://github.com/mattn/go-sqlite3)（MIT）。正是动态链接让 libusb
+的许可条款不会波及你自己的代码——静态链接 libusb 的构建必须提供重新链接的能力，
+所以请保持用 `brew install libusb` 的方式来提供它。
+
+vohive-mac 是独立实现，而不是移植：[VoHive](https://github.com/iniwex5/vohive)
+没有发布任何许可证，因此本项目没有取用它的任何代码。
