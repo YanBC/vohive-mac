@@ -22,11 +22,12 @@ const ifconfigPath = "/sbin/ifconfig"
 
 // LinkState is one parse of `ifconfig <iface>`.
 type LinkState struct {
-	Exists      bool // the interface is there at all
-	Up          bool // and its link is actually up ("status: active")
-	RoutableV4  bool // it holds an IPv4 address worth routing over
-	Expensive   bool // IFEF_EXPENSIVE
-	Constrained bool // IFXF_CONSTRAINED
+	Exists      bool   // the interface is there at all
+	Up          bool   // and its link is actually up ("status: active")
+	Index       string // distinguishes interface instances that reuse a BSD name
+	RoutableV4  bool   // it holds an IPv4 address worth routing over
+	Expensive   bool   // IFEF_EXPENSIVE
+	Constrained bool   // IFXF_CONSTRAINED
 }
 
 // Marked reports the low-data marking as this app applies it: both flags, set
@@ -39,6 +40,7 @@ func (l LinkState) Marked() bool { return l.Expensive && l.Constrained }
 var (
 	expensiveRe   = regexp.MustCompile(`[<,]EXPENSIVE[,>]`)
 	constrainedRe = regexp.MustCompile(`[<,]CONSTRAINED[,>]`)
+	ifIndexRe     = regexp.MustCompile(`\bindex ([0-9]+)\b`)
 )
 
 // readLink reads the interface's link state and low-data flags in one pass.
@@ -61,9 +63,15 @@ func readLink(iface string) LinkState {
 }
 
 func parseLink(out string) LinkState {
+	header, _, _ := strings.Cut(out, "\n")
+	var index string
+	if m := ifIndexRe.FindStringSubmatch(header); m != nil {
+		index = m[1]
+	}
 	return LinkState{
 		Exists:      true,
 		Up:          strings.Contains(out, "status: active"),
+		Index:       index,
 		RoutableV4:  hasRoutableV4(out),
 		Expensive:   expensiveRe.MatchString(out),
 		Constrained: constrainedRe.MatchString(out),

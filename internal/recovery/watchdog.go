@@ -73,14 +73,34 @@ func (w *Watchdog) Start() { go w.run() }
 
 func (w *Watchdog) Stop() { close(w.stop) }
 
+type recoveryTimers struct {
+	iface     string
+	index     string
+	downSince time.Time
+	dhcp      dhcpHeal
+}
+
+// observe starts a new observation window when the interface disappears or
+// macOS creates a new instance under the same name. The DHCP reboot budget
+// survives those events, including the reboots initiated by the watchdog.
+func (t *recoveryTimers) observe(iface string, link netif.LinkState) {
+	if !link.Exists || iface != t.iface || link.Index != t.index {
+		t.clearWindow()
+	}
+	t.iface, t.index = iface, link.Index
+}
+
+func (t *recoveryTimers) clearWindow() {
+	t.downSince, t.dhcp.noV4Since = time.Time{}, time.Time{}
+}
+
 func (w *Watchdog) run() {
 	ticker := time.NewTicker(watchInterval)
 	defer ticker.Stop()
-	var downSince time.Time
+	var timers recoveryTimers
 	var lastReset time.Time
 	var settleUntil time.Time
 	var verifyAt time.Time
-	var heal dhcpHeal
 	pinNoted := false // "SIM is locked" is logged on entry to that state, not every tick
 	lastTick := time.Now()
 	for {
@@ -97,7 +117,7 @@ func (w *Watchdog) run() {
 		if gap := now.Round(0).Sub(lastTick.Round(0)); gap > 3*watchInterval {
 			log.Printf("watchdog: wake detected (%s gap); settling %s before link checks",
 				gap.Round(time.Second), wakeSettle)
-			downSince = time.Time{}
+			timers.clearWindow()
 			settleUntil = now.Add(wakeSettle)
 		}
 		lastTick = now
@@ -115,38 +135,34 @@ func (w *Watchdog) run() {
 		}
 
 		iface, link := w.traffic.Link()
-		if iface == "" {
-			// Dongle gone. heal keeps its counters: a replug is not evidence
-			// that anything was fixed, and the reboots this watchdog issues
-			// make the interface vanish too — zeroing here would reset the
-			// limit on every attempt and loop forever.
-			downSince, heal.noV4Since = time.Time{}, time.Time{}
+		timers.observe(iface, link)
+		if !link.Exists {
 			continue
 		}
 		if link.Up {
 			// The link being up is not the same as it carrying traffic: the
 			// ECM side can be perfectly alive over IPv6 with no IPv4 lease.
-			downSince = time.Time{}
+			timers.downSince = time.Time{}
 			if link.RoutableV4 {
-				heal = dhcpHeal{}
+				timers.dhcp = dhcpHeal{}
 			} else {
-				w.healDHCP(iface, &heal)
+				w.healDHCP(iface, &timers.dhcp)
 			}
 			continue
 		}
-		heal.noV4Since = time.Time{}
+		timers.dhcp.noV4Since = time.Time{}
 		// Link down because cellular data is deliberately disabled, or
 		// because a commanded modem reboot (data toggle) is still settling,
 		// is the expected state, not a wedged ECM — never reset for it.
 		if w.modem.DataOff() || w.modem.Rebooting() {
-			downSince = time.Time{}
+			timers.downSince = time.Time{}
 			continue
 		}
-		if downSince.IsZero() {
-			downSince = time.Now()
+		if timers.downSince.IsZero() {
+			timers.downSince = time.Now()
 			continue
 		}
-		if time.Since(downSince) < linkDownThreshold ||
+		if time.Since(timers.downSince) < linkDownThreshold ||
 			(!lastReset.IsZero() && time.Since(lastReset) < resetCooldown) {
 			continue
 		}
@@ -161,7 +177,7 @@ func (w *Watchdog) run() {
 		}
 		if !enabled {
 			log.Printf("watchdog: %s link down but cellular data is disabled — leaving it alone", iface)
-			downSince = time.Time{}
+			timers.downSince = time.Time{}
 			continue
 		}
 		// A card waiting for its PIN carries no data, and re-enumerating the
@@ -174,19 +190,26 @@ func (w *Watchdog) run() {
 					iface, strings.ToUpper(need))
 				pinNoted = true
 			}
-			downSince = time.Time{}
+			timers.downSince = time.Time{}
 			continue
 		}
 		pinNoted = false
+		// The link may have changed while the AT probes were running.
+		currentIface, currentLink := w.traffic.Link()
+		timers.observe(currentIface, currentLink)
+		if timers.downSince.IsZero() || currentLink.Up {
+			timers.downSince = time.Time{}
+			continue
+		}
 		log.Printf("watchdog: %s link down for %s but modem alive — resetting USB device",
-			iface, time.Since(downSince).Round(time.Second))
+			iface, time.Since(timers.downSince).Round(time.Second))
 		if err := w.modem.ResetUSB(); err != nil {
 			// NOT_FOUND etc. after a successful reset is normal: the device
 			// re-enumerated out from under the handle.
 			log.Printf("watchdog: usb reset: %v", err)
 		}
 		lastReset = time.Now()
-		downSince = time.Time{}
+		timers.downSince = time.Time{}
 		verifyAt = lastReset.Add(30 * time.Second)
 	}
 }

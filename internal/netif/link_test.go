@@ -44,7 +44,7 @@ func TestParseLinkState(t *testing.T) {
 		out  string
 		want LinkState
 	}{
-		{"unmarked", realIfconfig, LinkState{Exists: true, Up: true, RoutableV4: true}},
+		{"unmarked", realIfconfig, LinkState{Exists: true, Up: true, Index: "28", RoutableV4: true}},
 		{"marked", marked, LinkState{Exists: true, Up: true, Expensive: true, Constrained: true}},
 		{"ultra constrained is not constrained", ultra, LinkState{Exists: true}},
 		{"flag last in list", trailing, LinkState{Exists: true, Up: true, Expensive: true, Constrained: true}},
