@@ -25,6 +25,25 @@ func TestParseDarkWake(t *testing.T) {
 	}
 }
 
+func TestDownThreshold(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	for _, tc := range []struct {
+		name   string
+		wokeAt time.Time
+		want   time.Duration
+	}{
+		{"no wake seen", time.Time{}, linkDownThreshold},
+		{"just woke", now.Add(-10 * time.Second), postWakeThreshold},
+		{"woke long ago", now.Add(-2 * time.Minute), linkDownThreshold},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := downThreshold(now, tc.wokeAt); got != tc.want {
+				t.Fatalf("downThreshold = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSleptBetween(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

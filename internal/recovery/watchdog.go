@@ -46,7 +46,20 @@ const (
 	watchInterval     = 3 * time.Second
 	linkDownThreshold = 10 * time.Second
 	resetCooldown     = 60 * time.Second
-	wakeSettle        = 15 * time.Second
+
+	// After a full wake the link is known to be dead — the firmware has never
+	// once re-asserted it after a suspend — so every second waited is a second
+	// the user sits offline. wakeSettle still keeps the reset off a USB stack
+	// that is mid-resume (the kernel reports full capabilities within a second
+	// of waking; the resets that knocked the dongle off the bus all landed as
+	// the machine was going back to sleep, which the dark-wake check now
+	// refuses), and the shorter threshold applies only inside
+	// postWakeWindow. Elsewhere linkDownThreshold stands: a freshly enumerated
+	// interface reads down for about 2 s, too close to 3 s to risk a reset
+	// that would itself start a fresh enumeration.
+	wakeSettle        = 5 * time.Second
+	postWakeThreshold = 3 * time.Second
+	postWakeWindow    = time.Minute
 
 	// The DHCP failure below is a much slower business than a wedged link:
 	// the threshold has to clear a normal lease acquisition (observed at ~9 s
@@ -106,6 +119,7 @@ func (w *Watchdog) run() {
 	var timers recoveryTimers
 	var lastReset time.Time
 	var settleUntil time.Time
+	var wokeAt time.Time // last detected wake; see postWakeWindow
 	var verifyAt time.Time
 	pinNoted := false  // "SIM is locked" is logged on entry to that state, not every tick
 	darkNoted := false // likewise "dark wake", once per wake
@@ -130,6 +144,7 @@ func (w *Watchdog) run() {
 				gap.Round(time.Second), wakeSettle)
 			timers.clearWindow()
 			settleUntil = now.Add(wakeSettle)
+			wokeAt = now
 			darkNoted = false
 		}
 		lastTick = now
@@ -174,7 +189,7 @@ func (w *Watchdog) run() {
 			timers.downSince = time.Now()
 			continue
 		}
-		if time.Since(timers.downSince) < linkDownThreshold ||
+		if time.Since(timers.downSince) < downThreshold(now, wokeAt) ||
 			(!lastReset.IsZero() && time.Since(lastReset) < resetCooldown) {
 			continue
 		}
@@ -239,6 +254,16 @@ func (w *Watchdog) run() {
 		timers.downSince = time.Time{}
 		verifyAt = lastReset.Add(30 * time.Second)
 	}
+}
+
+// downThreshold is how long the link must stay down before a USB reset: short
+// right after a wake, where the link is known not to come back on its own,
+// and the ordinary threshold otherwise.
+func downThreshold(now, wokeAt time.Time) time.Duration {
+	if !wokeAt.IsZero() && now.Sub(wokeAt) < postWakeWindow {
+		return postWakeThreshold
+	}
+	return linkDownThreshold
 }
 
 // dhcpHeal is the state of the second failure mode: the ECM link is up, but
