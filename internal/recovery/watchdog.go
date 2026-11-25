@@ -19,8 +19,14 @@
 // a sleep and be satisfied the moment the machine wakes. Resetting the
 // device while the USB stack is still resuming has been observed to knock
 // the dongle off the bus entirely (libusb reset timeout, device gone until
-// replugged). A sleep gap is detected as a wall-clock jump between ticks;
-// it clears the timer and imposes wakeSettle of quiet time first.
+// replugged). A sleep is detected as the wall clock running ahead of the
+// monotonic one between ticks; it clears the timer and imposes wakeSettle of
+// quiet time first.
+//
+// Nor is a dark wake recovered. With the lid closed the machine wakes every
+// quarter hour for maintenance and dozes through one-second sleeps; the link
+// is down for all of it, and a reset there only burns a DHCP lease and the
+// dongle goes down again at the next sleep. Recovery waits for a full wake.
 //
 // There is a second failure mode with the opposite signature — the link up
 // and healthy, carrying IPv6, but with no IPv4 address at all — which the
@@ -101,7 +107,8 @@ func (w *Watchdog) run() {
 	var lastReset time.Time
 	var settleUntil time.Time
 	var verifyAt time.Time
-	pinNoted := false // "SIM is locked" is logged on entry to that state, not every tick
+	pinNoted := false  // "SIM is locked" is logged on entry to that state, not every tick
+	darkNoted := false // likewise "dark wake", once per wake
 	lastTick := time.Now()
 	for {
 		select {
@@ -110,15 +117,20 @@ func (w *Watchdog) run() {
 		case <-ticker.C:
 		}
 
-		// Detect a sleep period as a wall-clock jump between ticks (the
-		// monotonic clock is unreliable across sleep, so compare wall time
-		// via Round(0)). Ticks are watchInterval apart when running.
+		// Detect a sleep period between ticks. The monotonic clock stops
+		// while the machine sleeps and the wall clock (Round(0) strips the
+		// monotonic reading) does not, so the difference catches even the
+		// one-second sleeps a closed lid dozes through, which are shorter
+		// than the tick gap check can see. Ticks are watchInterval apart
+		// when running.
 		now := time.Now()
-		if gap := now.Round(0).Sub(lastTick.Round(0)); gap > 3*watchInterval {
+		gap := now.Round(0).Sub(lastTick.Round(0))
+		if gap > 3*watchInterval || sleptBetween(gap, now.Sub(lastTick)) {
 			log.Printf("watchdog: wake detected (%s gap); settling %s before link checks",
 				gap.Round(time.Second), wakeSettle)
 			timers.clearWindow()
 			settleUntil = now.Add(wakeSettle)
+			darkNoted = false
 		}
 		lastTick = now
 		if now.Before(settleUntil) {
@@ -164,6 +176,21 @@ func (w *Watchdog) run() {
 		}
 		if time.Since(timers.downSince) < linkDownThreshold ||
 			(!lastReset.IsZero() && time.Since(lastReset) < resetCooldown) {
+			continue
+		}
+		// A dark wake (lid closed, the machine up for maintenance and about
+		// to sleep again) leaves the link down because the bus is suspending
+		// under it, not because the ECM is wedged; it drops again at the next
+		// sleep whatever is done. Resetting then cuts nothing anyone is using,
+		// burns a DHCP lease (see healDHCP), and has landed seconds before the
+		// machine slept, mid re-enumeration. Only a full wake is recovered,
+		// and the user opening the lid is one.
+		if inDarkWake() {
+			if !darkNoted {
+				log.Printf("watchdog: %s link down during a dark wake — leaving it for a full wake", iface)
+				darkNoted = true
+			}
+			timers.downSince = time.Time{}
 			continue
 		}
 		// Only reset if the modem still answers on the AT port; if it
@@ -257,6 +284,12 @@ func (w *Watchdog) healDHCP(iface string, h *dhcpHeal) {
 		return
 	}
 	if !h.lastReboot.IsZero() && time.Since(h.lastReboot) < dhcpRebootCd {
+		return
+	}
+	// Not in a dark wake either, for the reason given on the reset path: a
+	// budget spent on a dozing machine is one a full wake cannot use.
+	if inDarkWake() {
+		h.noV4Since = time.Time{}
 		return
 	}
 	if h.reboots >= dhcpRebootLimit {
