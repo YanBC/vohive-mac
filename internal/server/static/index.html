@@ -10,8 +10,16 @@
 try{ const t=localStorage.getItem("theme");
   if(t==="light"||t==="dark") document.documentElement.dataset.theme=t; }catch(e){}
 </script>
+<!-- The web fonts are decoration, and must never stand between the console and
+     the dongle: this page is most needed exactly when the internet is broken. A
+     plain stylesheet link here blocks rendering *and* every script below it
+     until Google answers, so with the network down (or a proxy wedged after the
+     dongle re-enumerates) the page sat blank and never polled the server, which
+     was answering fine. Loaded as print media it blocks nothing; onload switches
+     it on if it ever arrives, and until then the local fallbacks in --mono and
+     --disp are used. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Michroma&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Michroma&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
 /* Two palettes over the same tokens. The light one applies when the OS asks for
    it, unless the toggle pinned a theme (data-theme on <html>, set before first
